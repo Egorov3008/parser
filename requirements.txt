@@ -1,0 +1,4 @@
+pyrogram==2.0.106
+tgcrypto
+websockets>=12.0
+python-dotenv>=1.0
