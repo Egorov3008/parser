@@ -26,9 +26,10 @@ cp .env.example .env
 ```env
 TELEGRAM_API_ID=123456789        # Твой api_id
 TELEGRAM_API_HASH=abcdef1234...  # Твой api_hash
-OPENCLAW_GATEWAY_URL=ws://localhost:3000
-OPENCLAW_GATEWAY_TOKEN=secret_token_here
+TELEGRAM_SESSION_NAME=parser_session
+DB_PATH=parser.db                # SQLite база данных
 LOG_LEVEL=INFO
+LOG_FILE=logs/parser.log
 ```
 
 ## ▶️ Запуск
@@ -46,68 +47,104 @@ Enter phone number: +1234567890
 Enter the code that Telegram sent to you: 12345
 ```
 
-После авторизации парсер подключится к OpenClaw Gateway.
+После авторизации парсер начнёт сохранять сообщения в `parser.db`.
 
 ## 🎯 Проверка работы
 
-### В другом терминале отправь команду:
+### 1. Добавить канал для мониторинга
+
+Отредактируй файл `channels.json`:
+
+```json
+{
+  "channels": ["@durov"],
+  "enabled": true
+}
+```
+
+Или создай скрипт:
+
+```python
+from channel_registry import ChannelRegistry
+
+registry = ChannelRegistry()
+registry.add("@durov")
+print(registry.channels)
+```
+
+Запуск:
+```bash
+python -c "from channel_registry import ChannelRegistry; r = ChannelRegistry(); r.add('@durov')"
+```
+
+### 2. Проверить логи парсера
+
+В консоли парсера (main.py) должны появиться:
+
+```
+[2025-02-28 18:00:42,123] INFO parser.main: Starting Telegram Parser for OpenClaw
+[2025-02-28 18:00:42,456] INFO parser.db: Database tables initialized
+[2025-02-28 18:00:43,789] INFO parser.main: Starting Pyrogram client
+[2025-02-28 18:00:45,000] INFO parser.main: Pyrogram client started
+```
+
+### 3. Когда в канал приходит сообщение:
+
+```
+[2025-02-28 18:05:00,123] DEBUG parser.handler.channel: Storing channel message: {...}
+[2025-02-28 18:05:00,456] DEBUG parser.db: Inserted message 1: channel message_id=12345
+```
+
+### 4. Проверить БД
 
 ```bash
-cat > send_command.py << 'EOF'
-import asyncio
-import json
-import websockets
-import hmac
-import hashlib
-import secrets
+# Посмотреть структуру таблицы
+sqlite3 parser.db ".schema messages"
 
-async def test():
-    token = "secret_token_here"  # Из .env файла
+# Проверить количество сообщений
+sqlite3 parser.db "SELECT COUNT(*) as count FROM messages;"
 
-    async with websockets.connect("ws://localhost:3000") as ws:
-        # Handshake
-        nonce = secrets.token_hex(16)
-        sig = hmac.new(token.encode(), nonce.encode(), hashlib.sha256).hexdigest()
+# Посмотреть последние сообщения
+sqlite3 parser.db "SELECT message_id, text, timestamp FROM messages LIMIT 5;"
 
-        await ws.send(json.dumps({
-            "type": "connect",
-            "nonce": nonce,
-            "signature": sig
-        }))
-
-        # Подождать подтверждение
-        print(await ws.recv())
-
-        # Добавить канал
-        await ws.send(json.dumps({
-            "type": "req",
-            "id": 1,
-            "method": "channel.add",
-            "params": {"username": "@durov"}
-        }))
-
-        print(await ws.recv())
-
-asyncio.run(test())
-EOF
-
-python send_command.py
+# Посмотреть сообщения из конкретного канала
+sqlite3 parser.db "SELECT * FROM messages WHERE channel_username = '@durov' ORDER BY timestamp DESC LIMIT 5;"
 ```
 
 ## 📊 Что должно получиться
 
 ### В консоли парсера (main.py):
+
 ```
-[2025-02-25 20:36:42,123] INFO parser.main: Starting Telegram Parser for OpenClaw
-[2025-02-25 20:36:42,456] INFO parser.gateway: Successfully connected to OpenClaw Gateway
-[2025-02-25 20:36:43,789] INFO parser.registry: Added channel @durov
-[2025-02-25 20:36:50,000] DEBUG parser.gateway: Sending req frame: {'type': 'req', ...}
+[2025-02-28 18:00:42,123] INFO parser.main: Starting Telegram Parser for OpenClaw
+[2025-02-28 18:00:42,456] INFO parser.db: Connected to database at parser.db
+[2025-02-28 18:00:43,789] INFO parser.main: Starting Pyrogram client
+[2025-02-28 18:00:45,000] INFO parser.main: Pyrogram client started
 ```
 
-### Когда кто-то напишет в канал @durov:
+### Файлы в директории:
+
 ```
-[2025-02-25 20:36:55,000] DEBUG parser.handler.channel: Sending channel message: {...}
-[2025-02-25 20:36:55,100] DEBUG parser.gateway: Sending req frame: {'type': 'req', 'id': 1, 'method': 'message.ingest', ...}
+parser/
+├── parser.db                    # ✓ Новый файл (SQLite БД)
+├── parser_session.session       # ✓ Сессия Telegram (после авторизации)
+├── channels.json                # ✓ Конфигурация каналов
+├── logs/
+│   └── parser.log              # ✓ Логи (если LOG_FILE установлен)
+└── ...остальные файлы...
+```
+
+### В SQLite базе:
+
+```bash
+$ sqlite3 parser.db
+SQLite version 3.40.0
+
+sqlite> SELECT COUNT(*) FROM messages;
+42
+
+sqlite> SELECT * FROM messages LIMIT 1;
+1|channel|123456789|@durov|Durov|NULL|...|Hello, World!|1708884000.0|987654321|durov|Pavel|2025-02-28 18:05:00
 ```
 
 ## 🛠️ Основные команды
@@ -127,58 +164,10 @@ rm parser_session.session
 python main.py
 ```
 
-## 📝 Основные операции через WebSocket
-
-### Добавить канал
-```json
-{
-  "type": "req",
-  "id": 1,
-  "method": "channel.add",
-  "params": {"username": "@news_channel"}
-}
-```
-
-### Удалить канал
-```json
-{
-  "type": "req",
-  "id": 2,
-  "method": "channel.remove",
-  "params": {"username": "@news_channel"}
-}
-```
-
-### Включить парсер
-```json
-{
-  "type": "req",
-  "id": 3,
-  "method": "bot.enable",
-  "params": {}
-}
-```
-
-### Отключить парсер
-```json
-{
-  "type": "req",
-  "id": 4,
-  "method": "bot.disable",
-  "params": {}
-}
-```
-
 ## ⚠️ Частые ошибки
 
 ### "TELEGRAM_API_ID and TELEGRAM_API_HASH are required"
 ✅ Заполни эти значения в `.env` файле
-
-### "Failed to handshake with OpenClaw Gateway"
-✅ Проверь что:
-- OpenClaw запущен на `OPENCLAW_GATEWAY_URL`
-- Токен совпадает в парсере и OpenClaw
-- Интернет соединение работает
 
 ### "Session expired"
 ✅ Удали файл сессии и переавторизуйся:
@@ -187,18 +176,30 @@ rm parser_session.session
 python main.py
 ```
 
-### "ConnectionRefusedError"
-✅ Проверь URL и порт:
+### Сообщения не поступают в БД
+✅ Проверь:
+1. Является ли канал публичным (доступный по username)
+2. Является ли канал добавленным в `channels.json`
+3. Включен ли парсер (`"enabled": true` в `channels.json`)
+4. Логи парсера с `LOG_LEVEL=DEBUG`
+
 ```bash
-curl -v ws://localhost:3000
+cat channels.json
+LOG_LEVEL=DEBUG python main.py | grep -i "message\|channel"
+```
+
+### БД файл не создаётся
+✅ Проверь права на запись в директорию:
+```bash
+touch test.db && rm test.db
 ```
 
 ## 📚 Дальше
 
 - Читай [README.md](README.md) для подробного описания
-- Смотри [EXAMPLES.md](EXAMPLES.md) для примеров кода
-- Проверь [FAQ.md](FAQ.md) если что-то не работает
-- Изучи [ARCHITECTURE.md](ARCHITECTURE.md) для понимания архитектуры
+- Смотри [ARCHITECTURE.md](ARCHITECTURE.md) для понимания архитектуры
+- Проверь [DEVELOPMENT.md](DEVELOPMENT.md) для разработки
+- Изучи [FAQ.md](FAQ.md) если что-то не работает
 
 ## ✅ Чек-лист
 
@@ -207,12 +208,12 @@ curl -v ws://localhost:3000
 - [ ] Создал и заполнил `.env` файл
 - [ ] Запустил парсер: `python main.py`
 - [ ] Авторизовался в Telegram
-- [ ] Отправил тестовую команду `channel.add`
-- [ ] Увидел сообщение в логах парсера
-- [ ] Отправил сообщение в канал
-- [ ] Увидел событие `message.ingest` в OpenClaw
+- [ ] Добавил канал в `channels.json`
+- [ ] Убедился, что БД файл создан: `ls -la parser.db`
+- [ ] Проверил данные в БД: `sqlite3 parser.db "SELECT COUNT(*) FROM messages;"`
+- [ ] Увидел сообщения в БД при отправке в канал
 
-🎉 Готово! Парсер работает!
+🎉 Готово! Парсер работает и сохраняет сообщения!
 
 ---
 
@@ -220,18 +221,18 @@ curl -v ws://localhost:3000
 
 ### Для разработчиков:
 - Прочитай [DEVELOPMENT.md](DEVELOPMENT.md)
-- Добавь свои обработчики сообщений
-- Интегрируй с твоей системой
+- Посмотри примеры в [EXAMPLES.md](EXAMPLES.md)
+- Модифицируй парсер для своих нужд
 
-### Для операционников:
-- Настрой [Docker](README.md#docker-развёртывание)
-- Подними сервис через [systemd](README.md#systemd-развёртывание)
-- Подготовь логирование и мониторинг
+### Для интеграции с OpenClaw:
+- Скопируй путь БД: `parser.db`
+- Настрой OpenClaw для чтения из этого файла
+- Используй SQL запросы для доступа к сообщениям
 
-### Для аналитиков:
-- Смотри [примеры интеграции](EXAMPLES.md#интеграция-с-flask-api)
-- Сохраняй сообщения в БД
-- Анализируй данные
+### Для остальных применений:
+- Экспортируй данные в CSV: `sqlite3 parser.db ".mode csv" "SELECT * FROM messages;" > messages.csv`
+- Создай REST API для доступа к данным
+- Анализируй данные на Python
 
 ---
 
