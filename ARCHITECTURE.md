@@ -26,38 +26,49 @@
 │  │ Channel Handler:                                    │   │
 │  │  • Проверяет registry.is_active(username)           │   │
 │  │  • Извлекает данные сообщения                       │   │
-│  │  • Вызывает gateway.send_event("message.ingest")    │   │
+│  │  • Вызывает db.insert_message(payload)              │   │
 │  └─────────────────────────────────────────────────────┘   │
 │  ┌─────────────────────────────────────────────────────┐   │
 │  │ Private Handler:                                    │   │
 │  │  • Проверяет registry.enabled                       │   │
 │  │  • Извлекает данные DM                              │   │
-│  │  • Вызывает gateway.send_event("message.ingest")    │   │
+│  │  • Вызывает db.insert_message(payload)              │   │
 │  └─────────────────────────────────────────────────────┘   │
 └────────────────────────┬────────────────────────────────────┘
                          │
-                         │ (JSON frames)
+                         │ (Insert operations)
                          ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                 Gateway Client (WebSocket)                  │
+│                   SQLite Database Module                    │
 │  ┌───────────────────────────────────────────────────────┐  │
-│  │ send_event(method, params)                            │  │
-│  │  → {type:"req", id, method, params}                   │  │
+│  │ insert_message(payload) → row_id                      │  │
+│  │  • Преобразует payload в SQL значения                │  │
+│  │  • Вставляет в таблицу messages                      │  │
+│  │  • Возвращает ID строки                              │  │
 │  └───────────────────────────────────────────────────────┘  │
 │  ┌───────────────────────────────────────────────────────┐  │
-│  │ listen(callback)                                      │  │
-│  │  → {type:"req", method, params} →callback            │  │
-│  └───────────────────────────────────────────────────────┘  │
-│  ┌───────────────────────────────────────────────────────┐  │
-│  │ send_raw(response_frame)                              │  │
-│  │  → {type:"res", id, ok, payload|error}               │  │
+│  │ init()                                                │  │
+│  │  • Создаёт таблицу messages                          │  │
+│  │  • Создаёт индексы                                   │  │
 │  └───────────────────────────────────────────────────────┘  │
 └────────────────────────┬────────────────────────────────────┘
                          │
-                         │ (WebSocket)
+                         │ (File I/O)
                          ▼
 ┌─────────────────────────────────────────────────────────────┐
-│              OpenClaw Gateway (ws://localhost:3000)          │
+│                  parser.db (SQLite файл)                    │
+│                  ✓ Локально на диске                        │
+│                  ✓ Независимо от OpenClaw                   │
+│                  ✓ Доступна через SQL запросы               │
+└─────────────────────────────────────────────────────────────┘
+                         ▲
+                         │ (SQL queries)
+                         │
+┌─────────────────────────────────────────────────────────────┐
+│              OpenClaw (читает напрямую)                      │
+│  • SELECT * FROM messages WHERE ...                         │
+│  • Анализирует данные                                       │
+│  • Выполняет операции                                       │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -76,8 +87,7 @@
 TELEGRAM_API_ID          # int
 TELEGRAM_API_HASH        # str
 TELEGRAM_SESSION_NAME    # str
-OPENCLAW_GATEWAY_URL     # str
-OPENCLAW_GATEWAY_TOKEN   # str
+DB_PATH                  # str (путь к SQLite БД)
 LOG_LEVEL               # str (DEBUG, INFO, WARNING, ERROR)
 LOG_FILE                # str (path) или пусто
 ```
@@ -127,61 +137,46 @@ class ChannelRegistry:
 - Сохраняется автоматически при изменении состояния
 - Загружается при инициализации
 
-### 4. gateway_client.py
-**Назначение:** Коммуникация с OpenClaw Gateway через WebSocket
+### 4. db.py (НОВЫЙ МОДУЛЬ)
+**Назначение:** Асинхронная работа с SQLite БД
 
 **Ответственность:**
-- Установить WebSocket подключение
-- Выполнить handshake с HMAC-SHA256 подписью
-- Отправлять события на сервер
-- Слушать входящие команды
-- Отправлять ответы на команды
+- Инициализировать БД и создавать таблицы
+- Вставлять сообщения в таблицу
+- Управлять асинхронным подключением
+- Создавать индексы для производительности
 
-**Класс GatewayClient:**
+**Класс Database:**
 ```python
-class GatewayClient:
-    gateway_url: str
-    token: str
-    websocket: websockets.WebSocketClientProtocol | None
-    request_id: int              # Auto-increment для req фреймов
+class Database:
+    db_path: str
+    conn: aiosqlite.Connection | None
 
-    async def connect() -> None
-    async def send_event(method: str, params: dict | None) -> int
-    async def send_raw(frame: dict) -> bool
-    async def listen(callback) -> None
-    async def close() -> None
+    async def init() -> None              # Создать таблицы
+    async def insert_message(payload: dict) -> int  # Вставить и вернуть ID
+    async def close() -> None             # Закрыть подключение
 ```
 
-**WebSocket фреймы:**
-
-Подключение:
-```json
-{
-  "type": "connect",
-  "nonce": "hex_string",
-  "signature": "hmac_sha256"
-}
+**Таблица messages:**
+```sql
+id               INTEGER PRIMARY KEY AUTOINCREMENT
+source           TEXT NOT NULL        -- 'channel' или 'private'
+channel_id       INTEGER             -- ID канала (для channel)
+channel_username TEXT                -- Username канала (для channel)
+channel_title    TEXT                -- Название канала (для channel)
+chat_id          INTEGER             -- ID чата (для private)
+message_id       INTEGER NOT NULL    -- ID сообщения в Telegram
+text             TEXT                -- Текст сообщения
+timestamp        REAL                -- Unix timestamp
+from_user_id     INTEGER             -- ID отправителя
+from_username    TEXT                -- Username отправителя
+from_first_name  TEXT                -- Имя отправителя
+created_at       DATETIME DEFAULT CURRENT_TIMESTAMP
 ```
 
-Событие (запрос):
-```json
-{
-  "type": "req",
-  "id": 1,
-  "method": "message.ingest",
-  "params": {...}
-}
-```
-
-Ответ на команду:
-```json
-{
-  "type": "res",
-  "id": 1,
-  "ok": true,
-  "payload": {...}
-}
-```
+**Индексы:**
+- `idx_messages_timestamp` - для быстрого поиска по времени
+- `idx_messages_channel` - для быстрого поиска по каналу
 
 ### 5. tg_client.py
 **Назначение:** Инициализация Pyrogram клиента и регистрация обработчиков
@@ -194,7 +189,7 @@ class GatewayClient:
 **Функции:**
 ```python
 def build_client() -> Client
-def register_handlers(app: Client, gateway, registry) -> None
+def register_handlers(app: Client, db: Database, registry: ChannelRegistry) -> None
 ```
 
 **Фильтры Pyrogram:**
@@ -208,7 +203,7 @@ def register_handlers(app: Client, gateway, registry) -> None
 - Проверить, активен ли канал в реестре (`registry.is_active`)
 - Проверить наличие username канала
 - Извлечь данные сообщения (текст, автор, время)
-- Отправить событие `message.ingest` в OpenClaw
+- Сохранить сообщение в БД
 
 **Логика:**
 ```
@@ -217,7 +212,7 @@ def register_handlers(app: Client, gateway, registry) -> None
 3. Проверить registry.is_active(username)
 4. Если inactive → return (пропустить)
 5. Извлечь: id, title, message_id, text, timestamp, from_user
-6. Вызвать gateway.send_event("message.ingest", payload)
+6. Вызвать db.insert_message({...payload..., "source": "channel"})
 ```
 
 ### 7. handlers/private_handler.py
@@ -227,7 +222,7 @@ def register_handlers(app: Client, gateway, registry) -> None
 - Проверить глобальный флаг включения (`registry.enabled`)
 - Проверить наличие отправителя
 - Извлечь данные сообщения
-- Отправить событие `message.ingest` в OpenClaw
+- Сохранить сообщение в БД
 
 **Логика:**
 ```
@@ -236,67 +231,31 @@ def register_handlers(app: Client, gateway, registry) -> None
 3. Если disabled → return (пропустить)
 4. Проверить message.from_user
 5. Извлечь: chat_id, message_id, text, timestamp, from_user
-6. Вызвать gateway.send_event("message.ingest", payload)
+6. Вызвать db.insert_message({...payload..., "source": "private"})
 ```
 
-### 8. command_handler.py
-**Назначение:** Обработка команд от OpenClaw Gateway
-
-**Ответственность:**
-- Разбирать входящие фреймы команд
-- Выполнить соответствующую операцию в реестре
-- Отправить ответ обратно на сервер
-
-**Функция:**
-```python
-async def handle_gateway_command(
-    frame: dict,
-    registry: ChannelRegistry,
-    gateway: GatewayClient | None = None,
-    app = None
-) -> dict
-```
-
-**Поддерживаемые методы:**
-- `channel.add` → registry.add(username)
-- `channel.remove` → registry.remove(username)
-- `bot.enable` → registry.enable()
-- `bot.disable` → registry.disable()
-
-**Ответ:**
-```json
-{
-  "type": "res",
-  "id": frame_id,
-  "ok": true|false,
-  "payload": {...} | "error": "description"
-}
-```
-
-### 9. main.py
+### 8. main.py
 **Назначение:** Точка входа и оркестрация всех компонентов
 
 **Ответственность:**
 - Инициализировать логирование
 - Валидировать конфигурацию
-- Создать и подключить Gateway Client
+- Создать и инициализировать Database
 - Создать и запустить Pyrogram Client
-- Запустить цикл прослушивания команд
-- Обработать graceful shutdown
+- Управлять graceful shutdown
 
 **Основной поток:**
 ```
 1. setup_logging()
 2. Валидировать TELEGRAM_API_ID и TELEGRAM_API_HASH
 3. Создать registry = ChannelRegistry()
-4. Создать gateway = GatewayClient(...)
-5. await gateway.connect()
+4. Создать db = Database(DB_PATH)
+5. await db.init()  # Создать таблицы
 6. app = build_client()
-7. register_handlers(app, gateway, registry)
-8. Создать task: gateway.listen(command_callback)
-9. await app.start()
-10. await idle()
-11. Cleanup: app.stop(), gateway.close()
+7. register_handlers(app, db, registry)
+8. await app.start()
+9. await idle()
+10. Cleanup: app.stop(), db.close()
 ```
 
 ## 🔄 Асинхронные операции
@@ -306,23 +265,22 @@ async def handle_gateway_command(
 ```python
 asyncio.run(main())
   │
-  ├─ gateway.connect()              # Подключение к OpenClaw
-  │   └─ WebSocket handshake
+  ├─ db.init()                          # Инициализация БД
+  │   └─ CREATE TABLE messages (...)
   │
-  ├─ asyncio.create_task(gateway.listen(callback))  # Фоновая задача
-  │   └─ Слушает входящие команды
-  │      └─ handle_gateway_command()
-  │         └─ registry.add/remove/enable/disable()
-  │         └─ gateway.send_raw(response)
-  │
-  ├─ app.start()                    # Pyrogram клиент
+  ├─ app.start()                        # Pyrogram клиент
   │   └─ Слушает Telegram сообщения
-  │      └─ on_channel_message()
-  │         └─ gateway.send_event("message.ingest")
+  │      ├─ on_channel_message()
+  │      │   └─ handle_channel_message()
+  │      │       └─ db.insert_message(payload)
+  │      │           └─ INSERT INTO messages (...)
+  │      │
   │      └─ on_private_message()
-  │         └─ gateway.send_event("message.ingest")
+  │          └─ handle_private_message()
+  │              └─ db.insert_message(payload)
+  │                  └─ INSERT INTO messages (...)
   │
-  └─ idle()                         # Держать процесс живым
+  └─ idle()                             # Держать процесс живым
 ```
 
 ## 📊 Поток данных
@@ -342,71 +300,89 @@ Telegram Network
               │
               ├─ Извлечь данные сообщения
               │
-              └─ gateway.send_event("message.ingest", {...})
+              └─ db.insert_message({
+                  "source": "channel",
+                  "channel_id": ...,
+                  "channel_username": ...,
+                  "message_id": ...,
+                  "text": ...,
+                  "timestamp": ...,
+                  "from_user": {...}
+              })
                   │
-                  └─ GatewayClient.send_event()
+                  └─ Database.insert_message()
                       │
-                      └─ WebSocket.send({type:"req", id, method, params})
+                      └─ INSERT INTO messages (...)
                           │
-                          └─ OpenClaw Gateway
+                          └─ parser.db (SQLite файл)
 ```
 
-### Входящая команда от OpenClaw:
+### Входящее личное сообщение:
 
 ```
-OpenClaw Gateway
+Telegram Network
   │
-  └─ WebSocket.recv()
+  └─ Pyrogram Client
       │
-      └─ GatewayClient.listen(callback)
+      └─ @on_message(filters.private)
           │
-          └─ callback(frame) → handle_gateway_command(frame, registry, gateway)
+          └─ handle_private_message()
               │
-              ├─ Парсить method и params
+              ├─ Проверить registry.enabled
               │
-              ├─ Выполнить operation (add/remove/enable/disable)
+              ├─ Извлечь данные DM
               │
-              └─ gateway.send_raw({type:"res", id, ok, payload|error})
+              └─ db.insert_message({
+                  "source": "private",
+                  "chat_id": ...,
+                  "message_id": ...,
+                  "text": ...,
+                  "timestamp": ...,
+                  "from_user": {...}
+              })
                   │
-                  └─ WebSocket.send()
+                  └─ Database.insert_message()
                       │
-                      └─ OpenClaw Gateway
+                      └─ INSERT INTO messages (...)
+                          │
+                          └─ parser.db
+```
+
+### OpenClaw читает данные:
+
+```
+OpenClaw (любое время)
+  │
+  └─ SQL запрос к parser.db
+      │
+      └─ SELECT * FROM messages 
+         WHERE channel_username = '@news'
+         ORDER BY timestamp DESC
+         │
+         └─ Результаты
+             ├─ Анализирует данные
+             ├─ Выполняет операции
+             └─ Обновляет состояние
 ```
 
 ## 🔐 Безопасность
 
-### Аутентификация WebSocket:
+### Хранение данных:
 
-1. **HMAC-SHA256 подпись:**
-   ```python
-   nonce = secrets.token_hex(16)                    # 32 символа
-   signature = hmac.new(
-       token.encode(),
-       nonce.encode(),
-       hashlib.sha256
-   ).hexdigest()
-   ```
+1. **Локальная БД:**
+   - Все сообщения хранятся локально в SQLite
+   - Нет передачи данных через сеть
+   - Контроль доступа через файловую систему
 
-2. **Handshake фрейм:**
-   ```json
-   {
-     "type": "connect",
-     "nonce": "a1b2c3...",
-     "signature": "sha256_hash_of_token_xor_nonce"
-   }
-   ```
-
-3. **Защита переменных окружения:**
+2. **Защита переменных окружения:**
    - `.env` файл не коммитится (в `.gitignore`)
-   - Токены хранятся в переменных окружения
    - Пароли Telegram не передаются на сервер
+   - API ключи хранятся безопасно
 
-### Валидация:
-
-- Входящие JSON фреймы парсятся с error handling
-- Команды валидируются перед выполнением
-- Обязательные параметры проверяются
-- Исключения логируются
+3. **Валидация:**
+   - Входящие сообщения парсятся с error handling
+   - SQL параметры используют prepared statements
+   - Исключения логируются
 
 ## 🧪 Тестирование
 
@@ -414,20 +390,16 @@ OpenClaw Gateway
 
 ```bash
 # Проверка синтаксиса
-python -m py_compile config.py logger.py channel_registry.py gateway_client.py tg_client.py command_handler.py handlers/*.py main.py
+python -m py_compile config.py db.py logger.py channel_registry.py tg_client.py handlers/*.py main.py
 
 # Проверка импортов
-python -c "import config; import logger; import gateway_client; print('OK')"
+python -c "import config; import db; import logger; import channel_registry; print('OK')"
 
 # Запуск с DEBUG логированием
 LOG_LEVEL=DEBUG python main.py
-```
 
-### Мокирование OpenClaw Gateway:
-
-```bash
-# Простой WebSocket сервер для тестирования
-python -m websockets ws://localhost:3000
+# Проверка БД
+sqlite3 parser.db "SELECT COUNT(*) as message_count FROM messages;"
 ```
 
 ## 📈 Производительность
@@ -435,7 +407,7 @@ python -m websockets ws://localhost:3000
 ### Оптимизации:
 
 1. **Async/await**: Обработка сообщений не блокирует друг друга
-2. **JSON парсинг**: Парсируется только при получении фреймов
+2. **Индексы**: Индексы на timestamp и channel_username для быстрого поиска
 3. **Registry в памяти**: Быстрый O(1) доступ к каналам
 4. **Ротирующие логи**: Не растут бесконечно
 
@@ -444,63 +416,64 @@ python -m websockets ws://localhost:3000
 - **Множество каналов**: set[str] масштабируется хорошо
 - **Частые сообщения**: Async обработка справляется с нагрузкой
 - **Множество DM**: Каждый обрабатывается независимо
+- **Размер БД**: SQLite подходит для миллионов сообщений
 
 ## 🐛 Отладка
 
 ### Логирование по модулям:
 
 ```python
-logger = logging.getLogger("parser.gateway")     # для gateway_client.py
-logger = logging.getLogger("parser.handler.channel")  # для channel_handler.py
-logger = logging.getLogger("parser.command")      # для command_handler.py
+logger = logging.getLogger("parser.db")              # для db.py
+logger = logging.getLogger("parser.handler.channel") # для channel_handler.py
+logger = logging.getLogger("parser.handler.private") # для private_handler.py
 ```
 
 ### Трассировка вызовов:
 
 ```env
-LOG_LEVEL=DEBUG    # Все детали фреймов
+LOG_LEVEL=DEBUG    # Все детали операций с БД и сообщениями
 ```
 
 ### Инспектирование состояния:
 
-```python
-# В interactive режиме
-python -i main.py
->>> registry.channels
->>> registry.enabled
+```bash
+# Просмотр содержимого БД
+sqlite3 parser.db ".schema"
+sqlite3 parser.db "SELECT COUNT(*) FROM messages;"
+sqlite3 parser.db "SELECT * FROM messages LIMIT 5;"
+
+# Просмотр конфигурации
+grep -E "^[^#]" .env
 ```
 
 ## 📚 Расширение функциональности
 
-### Добавление новой команды:
+### Добавление новых полей в БД:
 
-1. Добавить обработку в `command_handler.py`:
+1. Отредактировать SQL в `db.py`:
 ```python
-elif method == "custom.command":
-    result = registry.do_something()
-    response = {
-        "type": "res",
-        "id": frame_id,
-        "ok": True,
-        "payload": {"result": result}
-    }
+ALTER TABLE messages ADD COLUMN new_field TEXT;
 ```
 
-2. Добавить логирование в `logger.py` (если нужно)
+2. Обновить payload в handlers:
+```python
+payload = {
+    # ... существующие поля ...
+    "new_field": extract_new_field(message)
+}
+```
 
-3. Протестировать через WebSocket
-
-### Добавление хендлера типа сообщения:
+### Добавление фильтра для сообщений:
 
 1. Создать функцию в `handlers/new_handler.py`
 2. Зарегистрировать в `tg_client.py`:
 ```python
 @app.on_message(filters.new_filter)
 async def on_new_message(client, message):
-    await handle_new_message(client, message, gateway, registry)
+    await handle_new_message(client, message, db, registry)
 ```
 
-3. Отправлять события через `gateway.send_event()`
+3. Вставлять сообщения через `db.insert_message()`
 
 ## 🔗 Зависимости между модулями
 
@@ -508,21 +481,17 @@ async def on_new_message(client, message):
 main.py
   ├── config.py              (переменные окружения)
   ├── logger.py              (setup_logging)
+  ├── db.py                  (Database класс) ← НОВЫЙ МОДУЛЬ
   ├── tg_client.py           (build_client, register_handlers)
   │   └── handlers/
   │       ├── channel_handler.py
   │       └── private_handler.py
-  ├── gateway_client.py      (GatewayClient)
-  ├── channel_registry.py    (ChannelRegistry)
-  └── command_handler.py     (handle_gateway_command)
+  └── channel_registry.py    (ChannelRegistry)
 
-gateway_client.py
+db.py
   └── (no internal deps)
 
 channel_registry.py
-  └── (no internal deps)
-
-command_handler.py
   └── (no internal deps)
 
 tg_client.py
@@ -532,33 +501,60 @@ config.py
   └── (external: dotenv)
 ```
 
-## 🎯 Примеры использования API
+## 🎯 Миграция от WebSocket-версии
 
-### Отправка события:
-```python
-request_id = await gateway.send_event("message.ingest", {
-    "message_id": 42,
-    "text": "Hello",
-    "timestamp": 1708884000.0
-})
-```
+### Что изменилось:
 
-### Добавление канала:
-```python
-registry.add("@news_channel")
-# Логирует: "INFO registry: Added channel @news_channel"
-```
+**Было (WebSocket версия):**
+- `gateway_client.py` - WebSocket клиент
+- `command_handler.py` - обработчик команд
+- Зависимость от `websockets>=12.0`
+- Требовал работающего OpenClaw Gateway
 
-### Проверка активности канала:
-```python
-if registry.is_active("@news_channel"):
-    # Канал активен и бот включен
-    pass
-```
+**Стало (SQLite версия):**
+- `db.py` - SQLite модуль
+- Зависимость на `aiosqlite>=0.19`
+- Работает полностью независимо
+- OpenClaw читает БД напрямую
 
-### Отключение обработки:
-```python
-registry.disable()
-# Логирует: "INFO registry: Bot disabled"
-# Теперь registry.enabled = False
+### Преимущества новой архитектуры:
+
+✅ Парсер работает полностью автономно
+✅ Не требует OpenClaw Gateway для работы
+✅ Данные сохраняются локально
+✅ OpenClaw может читать данные через SQL
+✅ Простая интеграция с другими приложениями
+✅ Легко добавить REST API для доступа
+
+## 📊 Примеры SQL запросов
+
+```sql
+-- Все сообщения из канала
+SELECT * FROM messages WHERE channel_username = '@news';
+
+-- Последние 10 сообщений
+SELECT * FROM messages ORDER BY timestamp DESC LIMIT 10;
+
+-- Сообщения за сегодня
+SELECT * FROM messages 
+WHERE DATE(created_at) = DATE('now');
+
+-- Количество сообщений по каналам
+SELECT channel_username, COUNT(*) 
+FROM messages 
+WHERE source = 'channel'
+GROUP BY channel_username
+ORDER BY COUNT(*) DESC;
+
+-- Самые активные авторы
+SELECT from_username, COUNT(*) 
+FROM messages 
+WHERE from_username IS NOT NULL
+GROUP BY from_username
+ORDER BY COUNT(*) DESC LIMIT 10;
+
+-- Поиск по тексту
+SELECT * FROM messages 
+WHERE text LIKE '%keyword%'
+ORDER BY timestamp DESC;
 ```

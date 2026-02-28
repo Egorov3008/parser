@@ -1,14 +1,15 @@
 # Pyrogram Telegram Parser для OpenClaw
 
-Простой парсер Telegram-сообщений на [Pyrogram](https://docs.pyrogram.org/), который слушает сообщения из каналов и личные сообщения аккаунта, затем перенаправляет их в [OpenClaw Gateway](https://github.com/openclaw/gateway) через WebSocket с JSON-фреймами.
+Простой парсер Telegram-сообщений на [Pyrogram](https://docs.pyrogram.org/), который слушает сообщения из каналов и личные сообщения аккаунта, затем сохраняет их в локальную SQLite базу данных для независимой обработки.
 
 ## 📋 Описание
 
-Этот парсер работает как оператор/источник данных для OpenClaw и позволяет:
+Этот парсер работает как автономный источник данных и позволяет:
 - Мониторить сообщения в Telegram-каналах
 - Обрабатывать входящие личные сообщения (DM)
-- Динамически управлять списком каналов через OpenClaw
-- Включать/отключать обработку сообщений
+- Сохранять все сообщения в SQLite БД
+- Работать без зависимости от OpenClaw Gateway
+- Позволять OpenClaw читать данные напрямую из БД SQL-запросами
 - Логировать все операции с настраиваемым уровнем детализации
 
 ## 🚀 Быстрый старт
@@ -22,7 +23,7 @@ pip install -r requirements.txt
 **Зависимости:**
 - `pyrogram==2.0.106` - MTProto клиент для Telegram
 - `tgcrypto` - Ускорение шифрования
-- `websockets>=12.0` - WebSocket клиент
+- `aiosqlite>=0.19` - Асинхронная работа с SQLite
 - `python-dotenv>=1.0` - Управление переменными окружения
 
 ### 2. Конфигурация
@@ -41,9 +42,8 @@ TELEGRAM_API_HASH=abcdef1234567890abcdef1234567890
 # Имя сессии (будет создан файл parser_session.session)
 TELEGRAM_SESSION_NAME=parser_session
 
-# OpenClaw Gateway
-OPENCLAW_GATEWAY_URL=ws://localhost:3000
-OPENCLAW_GATEWAY_TOKEN=your_secret_token_here
+# SQLite база данных
+DB_PATH=parser.db
 
 # Логирование
 LOG_LEVEL=INFO
@@ -65,7 +65,7 @@ python main.py
 
 При первом запуске вас попросят авторизоваться в Telegram. Следуйте инструкциям в консоли.
 
-После успешной авторизации парсер подключится к OpenClaw Gateway и начнёт слушать команды.
+После успешной авторизации парсер начнёт слушать сообщения из канаде и сохранять их в `parser.db`.
 
 ## 📁 Структура проекта
 
@@ -73,11 +73,10 @@ python main.py
 parser/
 ├── main.py                      # Точка входа
 ├── config.py                    # Загрузка конфигурации из .env
+├── db.py                        # SQLite модуль
 ├── logger.py                    # Настройка логирования
 ├── tg_client.py                 # Pyrogram клиент и регистрация обработчиков
-├── gateway_client.py            # WebSocket клиент для OpenClaw Gateway
 ├── channel_registry.py          # Реестр активных каналов и состояние бота
-├── command_handler.py           # Обработка команд от OpenClaw
 ├── handlers/
 │   ├── __init__.py
 │   ├── channel_handler.py       # Обработчик сообщений из каналов
@@ -96,8 +95,7 @@ parser/
 | `TELEGRAM_API_ID` | ID приложения Telegram API | - | ✅ Да |
 | `TELEGRAM_API_HASH` | Hash приложения Telegram API | - | ✅ Да |
 | `TELEGRAM_SESSION_NAME` | Имя сессии Pyrogram | `parser_session` | ❌ Нет |
-| `OPENCLAW_GATEWAY_URL` | URL WebSocket сервера OpenClaw | `ws://localhost:3000` | ❌ Нет |
-| `OPENCLAW_GATEWAY_TOKEN` | Токен для аутентификации в OpenClaw | - | ✅ Да |
+| `DB_PATH` | Путь к SQLite БД | `parser.db` | ❌ Нет |
 | `LOG_LEVEL` | Уровень логирования (DEBUG, INFO, WARNING, ERROR) | `INFO` | ❌ Нет |
 | `LOG_FILE` | Путь к файлу логов | `logs/parser.log` | ❌ Нет |
 
@@ -110,259 +108,174 @@ LOG_LEVEL=DEBUG      # Максимально подробно
 LOG_FILE=logs/parser.log  # Сохранять в файл
 ```
 
-**Форматт логов:**
+**Формат логов:**
 ```
-[2025-02-25 20:36:42,123] INFO parser.main: Starting Telegram Parser for OpenClaw
-[2025-02-25 20:36:42,456] DEBUG parser.gateway: Sending connect frame: {...}
+[2025-02-28 18:00:42,123] INFO parser.main: Starting Telegram Parser for OpenClaw
+[2025-02-28 18:00:42,456] DEBUG parser.db: Inserted message 1: channel message_id=12345
 ```
 
 **Уровни логирования:**
-- `DEBUG` - Все детали фреймов, промежуточные операции
-- `INFO` - Основные события (подключения, команды, сообщения)
-- `WARNING` - Предупреждения (пропущенные сообщения, ошибки подключения)
+- `DEBUG` - Все детали, промежуточные операции
+- `INFO` - Основные события (подключения, сохранение сообщений)
+- `WARNING` - Предупреждения (пропущенные сообщения, ошибки)
 - `ERROR` - Ошибки (исключения, отказы операций)
 
-## 📡 WebSocket протокол OpenClaw
+## 📊 SQLite база данных
 
-### Handshake (подключение)
+### Схема таблицы messages
 
-Парсер отправляет фрейм с HMAC-SHA256 подписью:
+```sql
+CREATE TABLE messages (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    source           TEXT NOT NULL,        -- 'channel' или 'private'
+    channel_id       INTEGER,
+    channel_username TEXT,
+    channel_title    TEXT,
+    chat_id          INTEGER,
+    message_id       INTEGER NOT NULL,
+    text             TEXT,
+    timestamp        REAL,
+    from_user_id     INTEGER,
+    from_username    TEXT,
+    from_first_name  TEXT,
+    created_at       DATETIME DEFAULT CURRENT_TIMESTAMP
+);
 
-```json
-{
-  "type": "connect",
-  "nonce": "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6",
-  "signature": "sha256_signature_of_token+nonce"
-}
+CREATE INDEX idx_messages_timestamp ON messages(timestamp);
+CREATE INDEX idx_messages_channel ON messages(channel_username);
 ```
 
-OpenClaw ответит:
-```json
-{
-  "type": "connected",
-  "ok": true
-}
+### Доступ к БД
+
+**Просмотр сообщений из канала:**
+```bash
+sqlite3 parser.db "SELECT message_id, text, timestamp FROM messages WHERE channel_username = '@news' ORDER BY timestamp DESC LIMIT 10;"
 ```
 
-### Отправка событий
+**Подсчет сообщений:**
+```bash
+sqlite3 parser.db "SELECT channel_username, COUNT(*) as count FROM messages GROUP BY channel_username;"
+```
 
-Парсер отправляет сообщения как события:
+**Получение последних сообщений:**
+```bash
+sqlite3 parser.db "SELECT * FROM messages ORDER BY created_at DESC LIMIT 5;"
+```
 
-```json
-{
-  "type": "req",
-  "id": 1,
-  "method": "message.ingest",
-  "params": {
-    "channel_id": 1234567890,
-    "channel_username": "@mychannel",
-    "channel_title": "My Channel",
-    "message_id": 42,
-    "text": "Hello, World!",
+**Экспорт в CSV:**
+```bash
+sqlite3 parser.db ".mode csv" "SELECT * FROM messages;" > messages.csv
+```
+
+### Python API для работы с БД
+
+```python
+from db import Database
+
+# Инициализировать БД
+db = Database("parser.db")
+await db.init()
+
+# Вставить сообщение
+payload = {
+    "source": "channel",
+    "channel_id": 123,
+    "channel_username": "@news",
+    "message_id": 456,
+    "text": "Hello",
     "timestamp": 1708884000.0,
-    "from_user": {
-      "id": 987654321,
-      "username": "user123",
-      "first_name": "John"
-    }
-  }
+    "from_user": {"id": 789, "username": "john", "first_name": "John"}
 }
+row_id = await db.insert_message(payload)
+
+# Закрыть БД
+await db.close()
 ```
 
-### Получение команд
+## 📝 Примеры использования
 
-OpenClaw отправляет команды, которые парсер обрабатывает:
+### Пример 1: Запуск парсера
+
+```bash
+$ python main.py
+[2025-02-28 18:00:42,123] INFO parser.main: Starting Telegram Parser for OpenClaw
+[2025-02-28 18:00:42,456] INFO parser.db: Connected to database at parser.db
+[2025-02-28 18:00:43,789] INFO parser.main: Starting Pyrogram client
+[2025-02-28 18:00:45,000] INFO parser.main: Pyrogram client started
+```
+
+### Пример 2: Добавление канала вручную
+
+Отредактируйте `channels.json`:
 
 ```json
 {
-  "type": "req",
-  "id": 1,
-  "method": "channel.add",
-  "params": {
-    "username": "@example_channel"
-  }
+  "channels": ["@news", "@updates"],
+  "enabled": true
 }
 ```
 
-Парсер отвечает:
-```json
-{
-  "type": "res",
-  "id": 1,
-  "ok": true,
-  "payload": {
-    "username": "@example_channel",
-    "added": true
-  }
-}
+Парсер автоматически загружает это при старте.
+
+### Пример 3: Чтение сообщений из Python
+
+```python
+import sqlite3
+
+conn = sqlite3.connect("parser.db")
+cursor = conn.cursor()
+
+# Получить последние 10 сообщений
+cursor.execute("""
+    SELECT message_id, channel_username, text, timestamp 
+    FROM messages 
+    ORDER BY timestamp DESC 
+    LIMIT 10
+""")
+
+for row in cursor.fetchall():
+    message_id, channel, text, timestamp = row
+    print(f"[{channel}] #{message_id}: {text[:50]}...")
+
+conn.close()
 ```
 
-## 🎯 Поддерживаемые команды
+### Пример 4: Интеграция с Flask API
 
-### `channel.add`
+```python
+from flask import Flask, jsonify
+import sqlite3
 
-Добавить канал в список мониторинга.
+app = Flask(__name__)
 
-**Запрос:**
-```json
-{
-  "type": "req",
-  "id": 1,
-  "method": "channel.add",
-  "params": {
-    "username": "@channel_name"
-  }
-}
+@app.route("/api/messages/<channel>")
+def get_channel_messages(channel):
+    conn = sqlite3.connect("parser.db")
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+        SELECT id, message_id, text, timestamp, from_username 
+        FROM messages 
+        WHERE channel_username = ? 
+        ORDER BY timestamp DESC 
+        LIMIT 100
+    """, (f"@{channel}",))
+    
+    messages = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    
+    return jsonify(messages)
+
+if __name__ == "__main__":
+    app.run(port=5000)
 ```
 
-**Ответ (успех):**
-```json
-{
-  "type": "res",
-  "id": 1,
-  "ok": true,
-  "payload": {
-    "username": "@channel_name",
-    "added": true
-  }
-}
-```
-
-**Ответ (ошибка):**
-```json
-{
-  "type": "res",
-  "id": 1,
-  "ok": false,
-  "error": "Missing 'username' parameter"
-}
-```
-
-### `channel.remove`
-
-Удалить канал из списка мониторинга.
-
-**Запрос:**
-```json
-{
-  "type": "req",
-  "id": 2,
-  "method": "channel.remove",
-  "params": {
-    "username": "@channel_name"
-  }
-}
-```
-
-**Ответ:**
-```json
-{
-  "type": "res",
-  "id": 2,
-  "ok": true,
-  "payload": {
-    "username": "@channel_name",
-    "removed": true
-  }
-}
-```
-
-### `bot.enable`
-
-Включить обработку сообщений глобально.
-
-**Запрос:**
-```json
-{
-  "type": "req",
-  "id": 3,
-  "method": "bot.enable",
-  "params": {}
-}
-```
-
-**Ответ:**
-```json
-{
-  "type": "res",
-  "id": 3,
-  "ok": true,
-  "payload": {
-    "enabled": true
-  }
-}
-```
-
-### `bot.disable`
-
-Отключить обработку сообщений глобально.
-
-**Запрос:**
-```json
-{
-  "type": "req",
-  "id": 4,
-  "method": "bot.disable",
-  "params": {}
-}
-```
-
-**Ответ:**
-```json
-{
-  "type": "res",
-  "id": 4,
-  "ok": true,
-  "payload": {
-    "enabled": false
-  }
-}
-```
-
-## 📊 События (message.ingest)
-
-### Сообщение из канала
-
-```json
-{
-  "type": "req",
-  "id": 100,
-  "method": "message.ingest",
-  "params": {
-    "channel_id": 1234567890,
-    "channel_username": "@news_channel",
-    "channel_title": "Важные новости",
-    "message_id": 12345,
-    "text": "Текст сообщения",
-    "timestamp": 1708884000.123,
-    "from_user": {
-      "id": 987654321,
-      "username": "admin",
-      "first_name": "Администратор"
-    }
-  }
-}
-```
-
-### Личное сообщение (DM)
-
-```json
-{
-  "type": "req",
-  "id": 101,
-  "method": "message.ingest",
-  "params": {
-    "chat_id": 987654321,
-    "message_id": 54321,
-    "text": "Привет!",
-    "timestamp": 1708884000.456,
-    "from_user": {
-      "id": 123456789,
-      "username": "john_doe",
-      "first_name": "John"
-    }
-  }
-}
+Запуск:
+```bash
+pip install flask
+python app.py
+curl http://localhost:5000/api/messages/news
 ```
 
 ## 🔍 Логирование и отладка
@@ -386,11 +299,10 @@ tail -f logs/parser.log
 LOG_LEVEL=DEBUG
 ```
 
-Выведет все фреймы WebSocket:
+Выведет все операции с БД:
 ```
-[2025-02-25 20:36:42,123] DEBUG parser.gateway: Sending connect frame: {...}
-[2025-02-25 20:36:42,456] DEBUG parser.gateway: Received frame: {"type": "connected", ...}
-[2025-02-25 20:36:43,789] DEBUG parser.handler.channel: Sending channel message: {...}
+[2025-02-28 18:00:42,123] DEBUG parser.db: Inserted message 1: channel message_id=12345
+[2025-02-28 18:00:43,456] DEBUG parser.handler.channel: Storing channel message: {...}
 ```
 
 **INFO** - для продакшена:
@@ -400,49 +312,9 @@ LOG_LEVEL=INFO
 
 Выведет только важные события:
 ```
-[2025-02-25 20:36:42,123] INFO parser.main: Starting Telegram Parser for OpenClaw
-[2025-02-25 20:36:42,456] INFO parser.gateway: Successfully connected to OpenClaw Gateway
-[2025-02-25 20:36:43,789] INFO parser.registry: Added channel @example_channel
-```
-
-## 📝 Пример использования
-
-### 1. Запуск парсера
-
-```bash
-$ python main.py
-[2025-02-25 20:36:42,123] INFO parser.main: Starting Telegram Parser for OpenClaw
-[2025-02-25 20:36:42,456] INFO parser.gateway: Connecting to OpenClaw Gateway at ws://localhost:3000
-[2025-02-25 20:36:43,789] INFO parser.gateway: Successfully connected to OpenClaw Gateway
-[2025-02-25 20:36:44,000] INFO parser.main: Starting Pyrogram client
-[2025-02-25 20:36:45,111] INFO parser.main: Pyrogram client started
-```
-
-### 2. Добавление канала
-
-OpenClaw отправляет:
-```json
-{
-  "type": "req",
-  "id": 1,
-  "method": "channel.add",
-  "params": {"username": "@news"}
-}
-```
-
-В логе парсера:
-```
-[2025-02-25 20:36:50,000] INFO parser.command: Received command: method=channel.add, params={'username': '@news'}
-[2025-02-25 20:36:50,100] INFO parser.registry: Added channel @news
-[2025-02-25 20:36:50,200] DEBUG parser.gateway: Sending raw frame: {'type': 'res', 'id': 1, 'ok': True, 'payload': {...}}
-```
-
-### 3. Получение сообщения из канала
-
-При отправке сообщения в канал @news:
-```
-[2025-02-25 20:36:55,000] DEBUG parser.handler.channel: Sending channel message: {...}
-[2025-02-25 20:36:55,100] DEBUG parser.gateway: Sending req frame: {'type': 'req', 'id': 1, 'method': 'message.ingest', 'params': {...}}
+[2025-02-28 18:00:42,123] INFO parser.main: Starting Telegram Parser for OpenClaw
+[2025-02-28 18:00:42,456] INFO parser.db: Database tables initialized
+[2025-02-28 18:00:43,789] INFO parser.main: Starting Pyrogram client
 ```
 
 ## 🐛 Решение проблем
@@ -457,23 +329,6 @@ OpenClaw отправляет:
 cat .env | grep TELEGRAM
 ```
 
-### Ошибка: "Failed to handshake with OpenClaw Gateway"
-
-**Причина:**
-- OpenClaw Gateway недоступен на указанном URL
-- Неправильный токен
-- Проблемы с сетью
-
-**Решение:**
-1. Проверьте `OPENCLAW_GATEWAY_URL`
-2. Проверьте `OPENCLAW_GATEWAY_TOKEN`
-3. Убедитесь, что сервер OpenClaw запущен и доступен
-4. Проверьте сетевые параметры
-
-```bash
-curl -i ws://localhost:3000  # Проверка доступности
-```
-
 ### Сообщения из канала не поступают
 
 **Причина:**
@@ -482,14 +337,37 @@ curl -i ws://localhost:3000  # Проверка доступности
 - Канал недоступен аккаунту
 
 **Решение:**
-1. Убедитесь, что канал добавлен: `channel.add` команда
-2. Проверьте, включен ли бот: `bot.enable` команда
+1. Убедитесь, что канал добавлен в `channels.json`
+2. Проверьте `"enabled": true` в `channels.json`
 3. Убедитесь, что аккаунт имеет доступ к каналу
 4. Проверьте логи с `LOG_LEVEL=DEBUG`
 
-### Сессия Pyrogram не работает
+```bash
+cat channels.json
+LOG_LEVEL=DEBUG python main.py | grep -i "channel"
+```
 
-**Причина:** Файл сессии повреждён или устарел.
+### БД файл не создаётся
+
+**Причина:**
+- Нет прав на запись в директорию
+- Неверный путь в DB_PATH
+
+**Решение:**
+```bash
+# Проверить права
+ls -la parser.db
+
+# Проверить путь в .env
+grep DB_PATH .env
+
+# Создать директорию если её нет
+mkdir -p logs
+```
+
+### "Session expired" при запуске парсера
+
+**Причина:** Файл сессии Telegram истекал.
 
 **Решение:** Удалите файл сессии и переавторизуйтесь:
 
@@ -505,28 +383,34 @@ python main.py
 
 - Никогда не коммитьте `.env` файл в git
 - `.env` добавлен в `.gitignore`
-- Храните `OPENCLAW_GATEWAY_TOKEN` в защищённом месте
+- Храните все секреты в переменных окружения
 
 ### Лучшие практики
 
-1. **Используйте сильные токены:**
-   ```
-   OPENCLAW_GATEWAY_TOKEN=<длинный_случайный_токен>
-   ```
+1. **Используйте отдельный аккаунт для парсера:**
+   - Не используйте личный аккаунт
+   - Если возможно, используйте тестовый аккаунт
 
 2. **Логирование:** Не включайте `LOG_LEVEL=DEBUG` в продакшене
 
-3. **Доступ к аккаунту:** Используйте отдельный аккаунт Telegram для парсера
+3. **БД:** Ограничьте доступ к файлу `parser.db`
+   ```bash
+   chmod 600 parser.db
+   ```
 
-4. **HTTPS/WSS:** В продакшене используйте защищённые подключения
+4. **Мониторинг:** Регулярно проверяйте размер БД
+   ```bash
+   ls -lh parser.db
+   ```
 
 ## 📚 Дополнительно
 
 ### Документация зависимостей
 
 - [Pyrogram Documentation](https://docs.pyrogram.org/)
-- [websockets Documentation](https://websockets.readthedocs.io/)
+- [aiosqlite Documentation](https://aiosqlite.readthedocs.io/)
 - [python-dotenv Documentation](https://python-dotenv.readthedocs.io/)
+- [SQLite Documentation](https://www.sqlite.org/docs.html)
 
 ### Полезные команды
 
@@ -542,6 +426,9 @@ LOG_LEVEL=DEBUG python main.py
 
 # Просмотр логов в реальном времени
 tail -f logs/parser.log | grep -E "INFO|ERROR"
+
+# Проверка БД
+sqlite3 parser.db "SELECT COUNT(*) as count FROM messages;"
 ```
 
 ## 📄 Лицензия
@@ -557,5 +444,5 @@ MIT
 При возникновении проблем:
 1. Проверьте логи с `LOG_LEVEL=DEBUG`
 2. Убедитесь в правильности конфигурации
-3. Проверьте доступность OpenClaw Gateway
+3. Проверьте доступность Telegram сети
 4. Откройте issue с описанием проблемы и логами

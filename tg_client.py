@@ -16,7 +16,7 @@ def build_client() -> Client:
     return app
 
 
-def register_handlers(app: Client, gateway, registry) -> None:
+def register_handlers(app: Client, db, registry) -> None:
     """Register message handlers for channels and private messages."""
     # Import handlers here to avoid circular imports
     from handlers.channel_handler import handle_channel_message
@@ -25,11 +25,11 @@ def register_handlers(app: Client, gateway, registry) -> None:
     # Register channel message handler
     @app.on_message(filters.channel)
     async def on_channel_message(client, message):
-        await handle_channel_message(client, message, gateway, registry)
+        await handle_channel_message(client, message, db, registry)
 
     # Register private message handler
     @app.on_message(filters.private)
     async def on_private_message(client, message):
-        await handle_private_message(client, message, gateway, registry)
+        await handle_private_message(client, message, db, registry)
 
     logger.info("Message handlers registered")

@@ -1,698 +1,280 @@
 # Примеры использования
 
-## 📝 Примеры с WebSocket клиентом
+## 📊 Примеры работы с БД
 
-### Пример 1: Подключение и добавление канала
-
-```python
-import asyncio
-import json
-import websockets
-import hmac
-import hashlib
-import secrets
-
-async def example_add_channel():
-    """Подключиться к парсеру и добавить канал."""
-
-    token = "your_secret_token"
-
-    async with websockets.connect("ws://localhost:3000") as websocket:
-        # Handshake
-        nonce = secrets.token_hex(16)
-        signature = hmac.new(
-            token.encode(),
-            nonce.encode(),
-            hashlib.sha256,
-        ).hexdigest()
-
-        connect_frame = {
-            "type": "connect",
-            "nonce": nonce,
-            "signature": signature,
-        }
-
-        await websocket.send(json.dumps(connect_frame))
-        response = await websocket.recv()
-        print(f"Handshake response: {response}")
-
-        # Добавить канал
-        add_channel_frame = {
-            "type": "req",
-            "id": 1,
-            "method": "channel.add",
-            "params": {"username": "@news_channel"}
-        }
-
-        await websocket.send(json.dumps(add_channel_frame))
-        response = await websocket.recv()
-        response_data = json.loads(response)
-        print(f"Add channel response: {json.dumps(response_data, indent=2)}")
-
-asyncio.run(example_add_channel())
-```
-
-**Вывод:**
-```
-Handshake response: {"type": "connected", "ok": true}
-Add channel response: {
-  "type": "res",
-  "id": 1,
-  "ok": true,
-  "payload": {
-    "username": "@news_channel",
-    "added": true
-  }
-}
-```
-
-### Пример 2: Слушание сообщений
+### Пример 1: Чтение сообщений из Python
 
 ```python
-import asyncio
-import json
-import websockets
-
-async def example_listen_messages():
-    """Подключиться и слушать сообщения из парсера."""
-
-    token = "your_secret_token"
-
-    async with websockets.connect("ws://localhost:3000") as websocket:
-        # Handshake (см. пример выше)
-        # ...
-
-        # Слушать сообщения
-        async for message in websocket:
-            frame = json.loads(message)
-
-            if frame.get("type") == "req" and frame.get("method") == "message.ingest":
-                print(f"Получено сообщение: {json.dumps(frame, indent=2)}")
-
-                # Отправить подтверждение
-                response = {
-                    "type": "res",
-                    "id": frame.get("id"),
-                    "ok": True,
-                    "payload": {"processed": True}
-                }
-                await websocket.send(json.dumps(response))
-
-asyncio.run(example_listen_messages())
-```
-
-### Пример 3: Управление несколькими каналами
-
-```python
-import asyncio
-import json
-import websockets
-import hmac
-import hashlib
-import secrets
-
-class ParserClient:
-    """Клиент для управления парсером."""
-
-    def __init__(self, url: str, token: str):
-        self.url = url
-        self.token = token
-        self.websocket = None
-        self.request_id = 0
-
-    async def connect(self):
-        """Подключиться к парсеру."""
-        self.websocket = await websockets.connect(self.url)
-
-        # Handshake
-        nonce = secrets.token_hex(16)
-        signature = hmac.new(
-            self.token.encode(),
-            nonce.encode(),
-            hashlib.sha256,
-        ).hexdigest()
-
-        await self.websocket.send(json.dumps({
-            "type": "connect",
-            "nonce": nonce,
-            "signature": signature,
-        }))
-
-        response = await self.websocket.recv()
-        response_data = json.loads(response)
-
-        if response_data.get("type") != "connected":
-            raise RuntimeError("Failed to connect")
-
-    async def add_channel(self, username: str) -> bool:
-        """Добавить канал."""
-        self.request_id += 1
-
-        await self.websocket.send(json.dumps({
-            "type": "req",
-            "id": self.request_id,
-            "method": "channel.add",
-            "params": {"username": username}
-        }))
-
-        response = json.loads(await self.websocket.recv())
-        return response.get("ok", False)
-
-    async def remove_channel(self, username: str) -> bool:
-        """Удалить канал."""
-        self.request_id += 1
-
-        await self.websocket.send(json.dumps({
-            "type": "req",
-            "id": self.request_id,
-            "method": "channel.remove",
-            "params": {"username": username}
-        }))
-
-        response = json.loads(await self.websocket.recv())
-        return response.get("ok", False)
-
-    async def enable_bot(self) -> bool:
-        """Включить парсер."""
-        self.request_id += 1
-
-        await self.websocket.send(json.dumps({
-            "type": "req",
-            "id": self.request_id,
-            "method": "bot.enable",
-            "params": {}
-        }))
-
-        response = json.loads(await self.websocket.recv())
-        return response.get("ok", False)
-
-    async def disable_bot(self) -> bool:
-        """Отключить парсер."""
-        self.request_id += 1
-
-        await self.websocket.send(json.dumps({
-            "type": "req",
-            "id": self.request_id,
-            "method": "bot.disable",
-            "params": {}
-        }))
-
-        response = json.loads(await self.websocket.recv())
-        return response.get("ok", False)
-
-    async def close(self):
-        """Закрыть соединение."""
-        if self.websocket:
-            await self.websocket.close()
-
-
-async def example_manage_channels():
-    """Управлять несколькими каналами."""
-
-    client = ParserClient("ws://localhost:3000", "your_token")
-    await client.connect()
-
-    try:
-        # Добавить каналы
-        channels = ["@news", "@updates", "@alerts"]
-        for channel in channels:
-            success = await client.add_channel(channel)
-            print(f"Добавлен {channel}: {success}")
-
-        # Включить парсер
-        await client.enable_bot()
-        print("Парсер включен")
-
-        # Слушать сообщения (в реальном приложении)
-        # async for message in client.websocket:
-        #     print(f"Message: {message}")
-
-        # Отключить парсер
-        await client.disable_bot()
-        print("Парсер отключен")
-
-        # Удалить каналы
-        for channel in channels:
-            success = await client.remove_channel(channel)
-            print(f"Удален {channel}: {success}")
-
-    finally:
-        await client.close()
-
-
-asyncio.run(example_manage_channels())
-```
-
----
-
-## 🔧 Примеры модификации парсера
-
-### Пример 4: Добавление нового типа события
-
-Модифицируем `handlers/channel_handler.py` для отправки дополнительных событий:
-
-```python
-# handlers/channel_handler.py
-import logging
-
-logger = logging.getLogger("parser.handler.channel")
-
-
-async def handle_channel_message(client, message, gateway, registry):
-    """Handle messages from Telegram channels."""
-    try:
-        # Check if channel is active
-        if not message.chat or not message.chat.username:
-            logger.debug("Skipping message with no channel username")
-            return
-
-        channel_username = message.chat.username
-        if not registry.is_active(channel_username):
-            logger.debug(f"Channel {channel_username} not active, skipping message")
-            return
-
-        # Extract message data
-        text = message.text or message.caption or ""
-        from_user = message.from_user
-        user_info = {
-            "id": from_user.id if from_user else None,
-            "username": from_user.username if from_user else None,
-            "first_name": from_user.first_name if from_user else None,
-        } if from_user else None
-
-        payload = {
-            "channel_id": message.chat.id,
-            "channel_username": channel_username,
-            "channel_title": message.chat.title or "",
-            "message_id": message.id,
-            "text": text,
-            "timestamp": message.date.timestamp() if message.date else None,
-            "from_user": user_info,
-        }
-
-        logger.debug(f"Sending channel message: {payload}")
-        await gateway.send_event("message.ingest", payload)
-
-        # НОВЫЙ КОД: Отправлять дополнительное событие для реакций
-        if message.reactions:
-            reactions_payload = {
-                "message_id": message.id,
-                "channel_username": channel_username,
-                "reactions": [
-                    {
-                        "emoji": reaction.emoji,
-                        "count": reaction.count
-                    }
-                    for reaction in message.reactions
-                ],
-                "timestamp": message.date.timestamp() if message.date else None,
-            }
-            await gateway.send_event("message.reactions", reactions_payload)
-
-    except Exception as e:
-        logger.error(f"Error handling channel message: {e}")
-```
-
-### Пример 5: Фильтрование сообщений по длине
-
-Модифицируем `handlers/channel_handler.py` для пропуска коротких сообщений:
-
-```python
-# handlers/channel_handler.py
-
-MIN_MESSAGE_LENGTH = 10  # Минимальная длина сообщения
-
-async def handle_channel_message(client, message, gateway, registry):
-    """Handle messages from Telegram channels."""
-    try:
-        if not message.chat or not message.chat.username:
-            logger.debug("Skipping message with no channel username")
-            return
-
-        channel_username = message.chat.username
-        if not registry.is_active(channel_username):
-            logger.debug(f"Channel {channel_username} not active, skipping message")
-            return
-
-        text = message.text or message.caption or ""
-
-        # НОВЫЙ КОД: Пропустить короткие сообщения
-        if len(text) < MIN_MESSAGE_LENGTH:
-            logger.debug(f"Skipping short message ({len(text)} chars)")
-            return
-
-        # ... остальной код ...
-```
-
-### Пример 6: Сохранение сообщений в БД
-
-Добавляем сохранение в SQLite:
-
-```python
-# handlers/channel_handler.py
 import sqlite3
-import logging
 
-logger = logging.getLogger("parser.handler.channel")
-DB_PATH = "messages.db"
+conn = sqlite3.connect("parser.db")
+conn.row_factory = sqlite3.Row
+cursor = conn.cursor()
 
+# Получить все сообщения из канала
+cursor.execute("""
+    SELECT id, message_id, text, timestamp, from_username
+    FROM messages
+    WHERE channel_username = '@news'
+    ORDER BY timestamp DESC
+    LIMIT 10
+""")
 
-def init_db():
-    """Инициализировать БД."""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS messages (
-            id INTEGER PRIMARY KEY,
-            message_id INTEGER,
-            channel_username TEXT,
-            text TEXT,
-            timestamp REAL,
-            user_id INTEGER,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    conn.commit()
-    conn.close()
+for row in cursor.fetchall():
+    print(f"[{row['from_username']}] {row['text']}")
 
-
-async def handle_channel_message(client, message, gateway, registry):
-    """Handle messages from Telegram channels."""
-    try:
-        if not message.chat or not message.chat.username:
-            logger.debug("Skipping message with no channel username")
-            return
-
-        channel_username = message.chat.username
-        if not registry.is_active(channel_username):
-            logger.debug(f"Channel {channel_username} not active, skipping message")
-            return
-
-        text = message.text or message.caption or ""
-        from_user = message.from_user
-
-        payload = {
-            "channel_id": message.chat.id,
-            "channel_username": channel_username,
-            "channel_title": message.chat.title or "",
-            "message_id": message.id,
-            "text": text,
-            "timestamp": message.date.timestamp() if message.date else None,
-            "from_user": {
-                "id": from_user.id if from_user else None,
-                "username": from_user.username if from_user else None,
-                "first_name": from_user.first_name if from_user else None,
-            } if from_user else None,
-        }
-
-        # Сохранить в БД
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO messages (message_id, channel_username, text, timestamp, user_id)
-            VALUES (?, ?, ?, ?, ?)
-        """, (
-            message.id,
-            channel_username,
-            text,
-            message.date.timestamp() if message.date else None,
-            from_user.id if from_user else None,
-        ))
-        conn.commit()
-        conn.close()
-
-        # Отправить в OpenClaw
-        logger.debug(f"Sending channel message: {payload}")
-        await gateway.send_event("message.ingest", payload)
-
-    except Exception as e:
-        logger.error(f"Error handling channel message: {e}")
+conn.close()
 ```
 
-### Пример 7: Добавление поддержки групп
-
-Модифицируем `tg_client.py` для добавления поддержки групп:
+### Пример 2: Поиск сообщений по ключевому слову
 
 ```python
-# tg_client.py
-import logging
-from pyrogram import Client, filters
-from config import TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_SESSION_NAME
+import sqlite3
 
-logger = logging.getLogger("parser.tg_client")
+conn = sqlite3.connect("parser.db")
+cursor = conn.cursor()
 
+keyword = "bitcoin"
 
-def build_client() -> Client:
-    """Create and return a Pyrogram client."""
-    app = Client(
-        TELEGRAM_SESSION_NAME,
-        api_id=TELEGRAM_API_ID,
-        api_hash=TELEGRAM_API_HASH,
-    )
-    logger.info(f"Created Pyrogram client with session {TELEGRAM_SESSION_NAME}")
-    return app
+# Поиск сообщений
+cursor.execute("""
+    SELECT message_id, channel_username, text, timestamp
+    FROM messages
+    WHERE text LIKE ? AND source = 'channel'
+    ORDER BY timestamp DESC
+    LIMIT 20
+""", (f"%{keyword}%",))
 
+results = cursor.fetchall()
+print(f"Found {len(results)} messages with '{keyword}'")
 
-def register_handlers(app: Client, gateway, registry) -> None:
-    """Register message handlers for channels and private messages."""
-    from handlers.channel_handler import handle_channel_message
-    from handlers.private_handler import handle_private_message
-    from handlers.group_handler import handle_group_message
+for message_id, channel, text, timestamp in results:
+    print(f"[{channel}] #{message_id}: {text[:50]}...")
 
-    @app.on_message(filters.channel)
-    async def on_channel_message(client, message):
-        await handle_channel_message(client, message, gateway, registry)
-
-    @app.on_message(filters.private)
-    async def on_private_message(client, message):
-        await handle_private_message(client, message, gateway, registry)
-
-    # НОВЫЙ КОД: Обработчик для групп
-    @app.on_message(filters.group)
-    async def on_group_message(client, message):
-        await handle_group_message(client, message, gateway, registry)
-
-    logger.info("Message handlers registered")
+conn.close()
 ```
 
-Создаем `handlers/group_handler.py`:
+### Пример 3: Анализ активности по каналам
 
 ```python
-# handlers/group_handler.py
-import logging
+import sqlite3
 
-logger = logging.getLogger("parser.handler.group")
+conn = sqlite3.connect("parser.db")
+cursor = conn.cursor()
 
+# Статистика по каналам
+cursor.execute("""
+    SELECT 
+        channel_username,
+        COUNT(*) as message_count,
+        COUNT(DISTINCT from_user_id) as unique_authors,
+        MIN(timestamp) as first_message,
+        MAX(timestamp) as last_message
+    FROM messages
+    WHERE source = 'channel'
+    GROUP BY channel_username
+    ORDER BY message_count DESC
+""")
 
-async def handle_group_message(client, message, gateway, registry):
-    """Handle messages from Telegram groups."""
-    try:
-        # Проверить, что группа в реестре
-        # (требует расширения ChannelRegistry)
+print("Channel Statistics:")
+print("-" * 80)
 
-        text = message.text or message.caption or ""
-        from_user = message.from_user
+for channel, count, authors, first, last in cursor.fetchall():
+    print(f"{channel:30} | {count:5} messages | {authors:3} authors")
 
-        if not from_user:
-            logger.debug("Skipping group message with no from_user")
-            return
-
-        payload = {
-            "group_id": message.chat.id,
-            "group_title": message.chat.title or "",
-            "message_id": message.id,
-            "text": text,
-            "timestamp": message.date.timestamp() if message.date else None,
-            "from_user": {
-                "id": from_user.id,
-                "username": from_user.username,
-                "first_name": from_user.first_name,
-            },
-        }
-
-        logger.debug(f"Sending group message: {payload}")
-        await gateway.send_event("message.ingest", payload)
-
-    except Exception as e:
-        logger.error(f"Error handling group message: {e}")
+conn.close()
 ```
 
----
-
-## 📊 Примеры отладки
-
-### Пример 8: Скрипт для мониторинга
+### Пример 4: Получение самых активных авторов
 
 ```python
-# monitoring.py
-import asyncio
-import json
-import websockets
-import hmac
-import hashlib
-import secrets
-from datetime import datetime
+import sqlite3
 
+conn = sqlite3.connect("parser.db")
+cursor = conn.cursor()
 
-async def monitor_parser():
-    """Мониторить входящие события от парсера."""
+# Топ авторов
+cursor.execute("""
+    SELECT 
+        from_username,
+        COUNT(*) as message_count,
+        COUNT(DISTINCT channel_username) as channels
+    FROM messages
+    WHERE from_username IS NOT NULL
+    GROUP BY from_username
+    ORDER BY message_count DESC
+    LIMIT 20
+""")
 
-    token = "your_token"
-    url = "ws://localhost:3000"
+print("Top 20 Authors:")
+print("-" * 60)
+print(f"{'Username':<20} | {'Messages':<10} | {'Channels':<10}")
+print("-" * 60)
 
-    async with websockets.connect(url) as websocket:
-        # Handshake
-        nonce = secrets.token_hex(16)
-        signature = hmac.new(
-            token.encode(),
-            nonce.encode(),
-            hashlib.sha256,
-        ).hexdigest()
+for username, count, channels in cursor.fetchall():
+    print(f"{username:<20} | {count:<10} | {channels:<10}")
 
-        await websocket.send(json.dumps({
-            "type": "connect",
-            "nonce": nonce,
-            "signature": signature,
-        }))
-
-        response = await websocket.recv()
-        print(f"[{datetime.now()}] Connected: {response}")
-
-        # Мониторить события
-        message_count = 0
-
-        async for message in websocket:
-            frame = json.loads(message)
-
-            if frame.get("type") == "req" and frame.get("method") == "message.ingest":
-                message_count += 1
-                params = frame.get("params", {})
-
-                print(f"[{datetime.now()}] Message #{message_count}")
-                print(f"  Channel: {params.get('channel_username', 'N/A')}")
-                print(f"  Text: {params.get('text', 'N/A')[:50]}...")
-                print(f"  From: {params.get('from_user', {}).get('username', 'N/A')}")
-                print()
-
-asyncio.run(monitor_parser())
+conn.close()
 ```
 
-Запуск:
-```bash
-python monitoring.py
-```
-
-### Пример 9: Скрипт для тестирования
-
-```bash
-#!/bin/bash
-# test_parser.sh
-
-echo "Testing Telegram Parser..."
-
-# Проверка синтаксиса
-echo "1. Checking syntax..."
-python -m py_compile *.py handlers/*.py && echo "✓ Syntax OK" || echo "✗ Syntax Error"
-
-# Проверка импортов
-echo "2. Checking imports..."
-python -c "import config, logger, gateway_client, channel_registry, command_handler, tg_client" && echo "✓ Imports OK" || echo "✗ Import Error"
-
-# Проверка конфигурации
-echo "3. Checking .env..."
-if [ -f ".env" ]; then
-    echo "✓ .env exists"
-    source .env
-    [ -z "$TELEGRAM_API_ID" ] && echo "✗ TELEGRAM_API_ID not set" || echo "✓ TELEGRAM_API_ID set"
-    [ -z "$TELEGRAM_API_HASH" ] && echo "✗ TELEGRAM_API_HASH not set" || echo "✓ TELEGRAM_API_HASH set"
-    [ -z "$OPENCLAW_GATEWAY_TOKEN" ] && echo "✗ OPENCLAW_GATEWAY_TOKEN not set" || echo "✓ OPENCLAW_GATEWAY_TOKEN set"
-else
-    echo "✗ .env not found"
-fi
-
-# Проверка зависимостей
-echo "4. Checking dependencies..."
-pip list | grep -E "pyrogram|websockets|python-dotenv" && echo "✓ Dependencies OK" || echo "✗ Missing dependencies"
-
-echo "All tests completed!"
-```
-
----
-
-## 🚀 Примеры интеграции
-
-### Пример 10: Интеграция с Flask API
+### Пример 5: Экспорт сообщений в CSV
 
 ```python
-# api.py
+import sqlite3
+import csv
+
+conn = sqlite3.connect("parser.db")
+cursor = conn.cursor()
+
+# Получить все сообщения
+cursor.execute("""
+    SELECT message_id, source, channel_username, text, timestamp, 
+           from_username, created_at
+    FROM messages
+    ORDER BY created_at DESC
+    LIMIT 1000
+""")
+
+# Экспортировать в CSV
+with open("messages_export.csv", "w", newline="", encoding="utf-8") as f:
+    writer = csv.writer(f)
+    writer.writerow(["ID", "Source", "Channel", "Text", "Timestamp", 
+                     "Author", "Created"])
+    writer.writerows(cursor.fetchall())
+
+print("✓ Exported to messages_export.csv")
+
+conn.close()
+```
+
+### Пример 6: Интеграция с Flask API
+
+```python
 from flask import Flask, jsonify, request
-from channel_registry import ChannelRegistry
-import json
+import sqlite3
 
 app = Flask(__name__)
-registry = ChannelRegistry()
 
+def get_db():
+    conn = sqlite3.connect("parser.db")
+    conn.row_factory = sqlite3.Row
+    return conn
 
-@app.route("/api/channels", methods=["GET"])
+@app.route("/api/messages")
+def get_messages():
+    """Получить последние сообщения."""
+    limit = request.args.get("limit", 50, type=int)
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+        SELECT id, message_id, source, channel_username, text, 
+               timestamp, from_username
+        FROM messages
+        ORDER BY timestamp DESC
+        LIMIT ?
+    """, (limit,))
+    
+    messages = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    
+    return jsonify(messages)
+
+@app.route("/api/channels")
 def get_channels():
-    """Получить список каналов."""
-    return jsonify({
-        "channels": list(registry.channels),
-        "enabled": registry.enabled,
-        "count": len(registry.channels)
-    })
+    """Получить список всех каналов с статистикой."""
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+        SELECT 
+            channel_username,
+            COUNT(*) as message_count,
+            MAX(timestamp) as last_message_timestamp
+        FROM messages
+        WHERE source = 'channel'
+        GROUP BY channel_username
+        ORDER BY message_count DESC
+    """)
+    
+    channels = []
+    for row in cursor.fetchall():
+        channels.append({
+            "username": row["channel_username"],
+            "message_count": row["message_count"],
+            "last_message": row["last_message_timestamp"]
+        })
+    
+    conn.close()
+    return jsonify(channels)
 
+@app.route("/api/channels/<channel>/messages")
+def get_channel_messages(channel):
+    """Получить сообщения из конкретного канала."""
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+        SELECT id, message_id, text, timestamp, from_username
+        FROM messages
+        WHERE channel_username = ?
+        ORDER BY timestamp DESC
+        LIMIT 100
+    """, (f"@{channel}",))
+    
+    messages = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    
+    return jsonify({"channel": f"@{channel}", "messages": messages})
 
-@app.route("/api/channels", methods=["POST"])
-def add_channel():
-    """Добавить канал."""
-    username = request.json.get("username")
-    if not username:
-        return jsonify({"error": "Missing username"}), 400
+@app.route("/api/search")
+def search_messages():
+    """Поиск сообщений по ключевому слову."""
+    
+    keyword = request.args.get("q", "")
+    if not keyword:
+        return jsonify({"error": "Missing query parameter 'q'"}), 400
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+        SELECT id, message_id, channel_username, text, timestamp
+        FROM messages
+        WHERE text LIKE ?
+        ORDER BY timestamp DESC
+        LIMIT 50
+    """, (f"%{keyword}%",))
+    
+    results = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    
+    return jsonify({"query": keyword, "results": results})
 
-    success = registry.add(username)
-    return jsonify({
-        "success": success,
-        "username": username,
-        "message": "Channel added" if success else "Channel already exists"
-    }), 200 if success else 409
-
-
-@app.route("/api/channels/<username>", methods=["DELETE"])
-def remove_channel(username):
-    """Удалить канал."""
-    success = registry.remove(username)
-    return jsonify({
-        "success": success,
-        "username": username,
-        "message": "Channel removed" if success else "Channel not found"
-    }), 200 if success else 404
-
-
-@app.route("/api/status", methods=["GET"])
-def get_status():
-    """Получить статус парсера."""
-    return jsonify({
-        "enabled": registry.enabled,
-        "channels_count": len(registry.channels),
-        "status": "running" if registry.enabled else "stopped"
-    })
-
-
-@app.route("/api/status", methods=["POST"])
-def update_status():
-    """Обновить статус парсера."""
-    action = request.json.get("action")
-
-    if action == "enable":
-        registry.enable()
-        return jsonify({"enabled": True})
-    elif action == "disable":
-        registry.disable()
-        return jsonify({"enabled": False})
-    else:
-        return jsonify({"error": "Invalid action"}), 400
-
+@app.route("/api/stats")
+def get_stats():
+    """Получить общую статистику."""
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+        SELECT 
+            (SELECT COUNT(*) FROM messages WHERE source = 'channel') as channel_messages,
+            (SELECT COUNT(*) FROM messages WHERE source = 'private') as private_messages,
+            (SELECT COUNT(DISTINCT channel_username) FROM messages) as total_channels,
+            (SELECT COUNT(DISTINCT from_user_id) FROM messages) as total_authors,
+            (SELECT MAX(timestamp) FROM messages) as last_message_time
+    """)
+    
+    row = cursor.fetchone()
+    stats = dict(row)
+    conn.close()
+    
+    return jsonify(stats)
 
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
@@ -706,23 +288,399 @@ python api.py
 
 Примеры использования:
 ```bash
+# Получить последние сообщения
+curl http://localhost:5000/api/messages?limit=10
+
 # Получить каналы
 curl http://localhost:5000/api/channels
 
-# Добавить канал
-curl -X POST http://localhost:5000/api/channels \
-  -H "Content-Type: application/json" \
-  -d '{"username": "@news"}'
+# Получить сообщения из канала
+curl http://localhost:5000/api/channels/news/messages
 
-# Удалить канал
-curl -X DELETE http://localhost:5000/api/channels/@news
+# Поиск
+curl "http://localhost:5000/api/search?q=bitcoin"
 
-# Получить статус
-curl http://localhost:5000/api/status
-
-# Отключить парсер
-curl -X POST http://localhost:5000/api/status \
-  -H "Content-Type: application/json" \
-  -d '{"action": "disable"}'
+# Статистика
+curl http://localhost:5000/api/stats
 ```
 
+---
+
+## 🔧 Примеры модификации парсера
+
+### Пример 7: Добавление фильтра по длине сообщения
+
+Модифицируем `handlers/channel_handler.py`:
+
+```python
+import logging
+
+MIN_MESSAGE_LENGTH = 10  # Минимальная длина
+
+logger = logging.getLogger("parser.handler.channel")
+
+async def handle_channel_message(client, message, db, registry):
+    """Handle messages from Telegram channels."""
+    try:
+        if not message.chat or not message.chat.username:
+            logger.debug("Skipping message with no channel username")
+            return
+
+        channel_username = message.chat.username
+        if not registry.is_active(channel_username):
+            logger.debug(f"Channel {channel_username} not active, skipping")
+            return
+
+        text = message.text or message.caption or ""
+
+        # ФИЛЬТР: Пропустить короткие сообщения
+        if len(text) < MIN_MESSAGE_LENGTH:
+            logger.debug(f"Skipping short message ({len(text)} chars)")
+            return
+
+        from_user = message.from_user
+
+        payload = {
+            "source": "channel",
+            "channel_id": message.chat.id,
+            "channel_username": channel_username,
+            "channel_title": message.chat.title or "",
+            "message_id": message.id,
+            "text": text,
+            "timestamp": message.date.timestamp() if message.date else None,
+            "from_user": {
+                "id": from_user.id if from_user else None,
+                "username": from_user.username if from_user else None,
+                "first_name": from_user.first_name if from_user else None,
+            } if from_user else None,
+        }
+
+        logger.debug(f"Storing channel message: {payload}")
+        await db.insert_message(payload)
+
+    except Exception as e:
+        logger.error(f"Error handling channel message: {e}")
+```
+
+### Пример 8: Добавление новых полей в БД
+
+1. Модифицируем `db.py` для добавления новой колонки:
+
+```python
+# В методе init() добавляем:
+await self.conn.execute("""
+    ALTER TABLE messages ADD COLUMN media_type TEXT;
+""")
+```
+
+2. Обновляем `handlers/channel_handler.py`:
+
+```python
+# Определяем медиа тип
+media_type = None
+if message.photo:
+    media_type = "photo"
+elif message.video:
+    media_type = "video"
+elif message.document:
+    media_type = "document"
+
+payload = {
+    # ... остальные поля ...
+    "media_type": media_type,
+}
+```
+
+3. Обновляем `db.py` метод `insert_message`:
+
+```python
+async def insert_message(self, payload: dict) -> int:
+    # ... существующий код ...
+    
+    media_type = payload.get("media_type")
+    
+    cursor = await self.conn.execute("""
+        INSERT INTO messages (
+            source, channel_id, channel_username, channel_title,
+            chat_id, message_id, text, timestamp,
+            from_user_id, from_username, from_first_name, media_type
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        source, channel_id, channel_username, channel_title,
+        chat_id, message_id, text, timestamp,
+        from_user_id, from_username, from_first_name, media_type
+    ))
+```
+
+---
+
+## 📈 Примеры анализа данных
+
+### Пример 9: Анализ тренда по дням
+
+```python
+import sqlite3
+from datetime import datetime, timedelta
+
+conn = sqlite3.connect("parser.db")
+cursor = conn.cursor()
+
+# Сообщения по дням за последние 30 дней
+cursor.execute("""
+    SELECT 
+        DATE(created_at) as day,
+        COUNT(*) as message_count,
+        COUNT(DISTINCT channel_username) as active_channels
+    FROM messages
+    WHERE created_at >= datetime('now', '-30 days')
+    GROUP BY DATE(created_at)
+    ORDER BY day DESC
+""")
+
+print("Messages per Day (Last 30 days):")
+print("-" * 50)
+print(f"{'Date':<12} | {'Messages':<10} | {'Channels':<10}")
+print("-" * 50)
+
+for day, count, channels in cursor.fetchall():
+    print(f"{day:<12} | {count:<10} | {channels:<10}")
+
+conn.close()
+```
+
+### Пример 10: Отправка уведомлений при достижении порога
+
+```python
+import sqlite3
+import smtplib
+from email.mime.text import MIMEText
+
+def check_and_notify(channel_username, min_messages=100):
+    """Проверить количество новых сообщений и отправить уведомление."""
+    
+    conn = sqlite3.connect("parser.db")
+    cursor = conn.cursor()
+    
+    # Получить количество сообщений за последний час
+    cursor.execute("""
+        SELECT COUNT(*) 
+        FROM messages
+        WHERE channel_username = ?
+        AND created_at >= datetime('now', '-1 hour')
+    """, (channel_username,))
+    
+    count = cursor.fetchone()[0]
+    conn.close()
+    
+    if count >= min_messages:
+        # Отправить уведомление
+        subject = f"Alert: {count} messages in {channel_username}"
+        body = f"Channel {channel_username} has received {count} messages in the last hour"
+        
+        # Здесь реализуете отправку (email, Slack, etc)
+        print(f"✓ Alert triggered: {subject}")
+
+# Примеры использования
+check_and_notify("@news", min_messages=50)
+check_and_notify("@updates", min_messages=100)
+```
+
+---
+
+## 📋 Примеры скриптов утилит
+
+### Пример 11: Скрипт для очистки старых сообщений
+
+```python
+# cleanup.py
+import sqlite3
+import argparse
+from datetime import datetime, timedelta
+
+parser = argparse.ArgumentParser(description="Clean old messages")
+parser.add_argument("--days", type=int, default=30, 
+                    help="Delete messages older than N days")
+parser.add_argument("--db", default="parser.db",
+                    help="Database path")
+args = parser.parse_args()
+
+conn = sqlite3.connect(args.db)
+cursor = conn.cursor()
+
+# Получить количество сообщений на удаление
+cursor.execute("""
+    SELECT COUNT(*) 
+    FROM messages 
+    WHERE created_at < datetime('now', ? || ' days')
+""", (f"-{args.days}",))
+
+count = cursor.fetchone()[0]
+
+if count > 0:
+    print(f"Deleting {count} messages older than {args.days} days...")
+    cursor.execute("""
+        DELETE FROM messages 
+        WHERE created_at < datetime('now', ? || ' days')
+    """, (f"-{args.days}",))
+    conn.commit()
+    print(f"✓ Deleted {cursor.rowcount} messages")
+else:
+    print("No messages to delete")
+
+conn.close()
+```
+
+Использование:
+```bash
+# Удалить сообщения старше 90 дней
+python cleanup.py --days 90
+
+# Удалить сообщения старше 30 дней (по умолчанию)
+python cleanup.py
+```
+
+### Пример 12: Скрипт для архивирования БД
+
+```python
+# archive.py
+import sqlite3
+import shutil
+from datetime import datetime
+import gzip
+
+db_path = "parser.db"
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+# Создаём резервную копию
+backup_path = f"parser_backup_{timestamp}.db"
+shutil.copy(db_path, backup_path)
+print(f"✓ Backup created: {backup_path}")
+
+# Сжимаем резервную копию
+with open(backup_path, 'rb') as f_in:
+    with gzip.open(f"{backup_path}.gz", 'wb') as f_out:
+        shutil.copyfileobj(f_in, f_out)
+print(f"✓ Compressed: {backup_path}.gz")
+
+# Удаляем несжатую копию
+import os
+os.remove(backup_path)
+print(f"✓ Removed: {backup_path}")
+```
+
+Использование:
+```bash
+python archive.py
+```
+
+---
+
+## 🚀 Примеры интеграции
+
+### Пример 13: Интеграция с Discord webhook
+
+```python
+import sqlite3
+import requests
+import asyncio
+from datetime import datetime, timedelta
+
+DISCORD_WEBHOOK = "https://discordapp.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN"
+
+async def send_to_discord():
+    """Отправить последние сообщения в Discord."""
+    
+    conn = sqlite3.connect("parser.db")
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    # Получить сообщения за последний час
+    cursor.execute("""
+        SELECT channel_username, text, from_username, timestamp
+        FROM messages
+        WHERE created_at >= datetime('now', '-1 hour')
+        ORDER BY created_at DESC
+        LIMIT 10
+    """)
+    
+    messages = cursor.fetchall()
+    conn.close()
+    
+    if not messages:
+        print("No new messages")
+        return
+    
+    # Форматируем сообщение для Discord
+    embed = {
+        "title": f"📊 Telegram Messages ({len(messages)})",
+        "description": f"Last hour activity",
+        "color": 3447003,
+        "fields": []
+    }
+    
+    for msg in messages:
+        embed["fields"].append({
+            "name": f"{msg['channel_username']} - {msg['from_username']}",
+            "value": msg['text'][:100] + ("..." if len(msg['text']) > 100 else ""),
+            "inline": False
+        })
+    
+    data = {"embeds": [embed]}
+    
+    response = requests.post(DISCORD_WEBHOOK, json=data)
+    if response.status_code == 204:
+        print("✓ Sent to Discord")
+    else:
+        print(f"✗ Failed: {response.status_code}")
+
+# Запуск
+asyncio.run(send_to_discord())
+```
+
+---
+
+## 🧪 Примеры тестирования
+
+### Пример 14: Unit тесты
+
+```python
+# test_db.py
+import asyncio
+import tempfile
+import os
+from db import Database
+
+async def test_database():
+    # Создаём временную БД
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = os.path.join(tmpdir, "test.db")
+        db = Database(db_path)
+        
+        # Инициализация
+        await db.init()
+        assert os.path.exists(db_path), "Database file not created"
+        
+        # Вставка
+        payload = {
+            "source": "channel",
+            "channel_id": 123,
+            "channel_username": "@test",
+            "message_id": 456,
+            "text": "Test message",
+            "timestamp": 1708884000.0,
+        }
+        row_id = await db.insert_message(payload)
+        assert row_id > 0, "Message not inserted"
+        
+        # Закрытие
+        await db.close()
+        
+        print("✓ All database tests passed!")
+
+asyncio.run(test_database())
+```
+
+Запуск:
+```bash
+python test_db.py
+```

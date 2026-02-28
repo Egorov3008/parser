@@ -3,7 +3,7 @@ import logging
 logger = logging.getLogger("parser.handler.private")
 
 
-async def handle_private_message(client, message, gateway, registry):
+async def handle_private_message(client, message, db, registry):
     """Handle private messages (DM) to the account."""
     try:
         # Check if bot is globally enabled
@@ -20,6 +20,7 @@ async def handle_private_message(client, message, gateway, registry):
             return
 
         payload = {
+            "source": "private",
             "chat_id": message.chat.id,
             "message_id": message.id,
             "text": text,
@@ -31,8 +32,8 @@ async def handle_private_message(client, message, gateway, registry):
             },
         }
 
-        logger.debug(f"Sending private message: {payload}")
-        await gateway.send_event("message.ingest", payload)
+        logger.debug(f"Storing private message: {payload}")
+        await db.insert_message(payload)
 
     except Exception as e:
         logger.error(f"Error handling private message: {e}")

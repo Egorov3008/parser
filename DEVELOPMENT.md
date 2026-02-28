@@ -20,7 +20,6 @@ source .venv/bin/activate  # На Windows: .venv\Scripts\activate
 
 ```bash
 pip install -r requirements.txt
-pip install -e .  # Если есть setup.py
 ```
 
 ### 4. Подготовка .env файла
@@ -37,16 +36,17 @@ cp .env.example .env
 ```python
 # Модули
 config.py              # Конфигурация
+db.py                  # БД операции
 logger.py              # Логирование
-*_client.py           # Клиенты (gateway_client.py)
-*_handler.py          # Обработчики (channel_handler.py)
-*_registry.py         # Реестры (channel_registry.py)
+*_client.py           # Клиенты
+*_handler.py          # Обработчики
+*_registry.py         # Реестры
 
 # Функции и методы
 def build_client()    # Конструктор-функция
 async def handle_*()  # Асинхронные обработчики
 def is_active()       # Проверка состояния
-def setup_*()         # Инициализация
+async def init()      # Инициализация
 ```
 
 ### Структура класса
@@ -90,7 +90,7 @@ class MyComponent:
 python -m py_compile *.py handlers/*.py
 
 # Проверка импортов
-python -c "import config, logger, gateway_client, channel_registry, command_handler, tg_client, main"
+python -c "import config, db, logger, channel_registry, tg_client"
 
 # Запуск с DEBUG логированием
 LOG_LEVEL=DEBUG python main.py
@@ -100,6 +100,45 @@ LOG_FILE=test.log python main.py
 ```
 
 ### Тестирование конкретных компонентов
+
+#### Тестирование Database
+
+```python
+import asyncio
+from db import Database
+
+async def test_db():
+    db = Database("test.db")
+    
+    # Инициализация
+    await db.init()
+    print("✓ Database initialized")
+    
+    # Вставка сообщения
+    payload = {
+        "source": "channel",
+        "channel_id": 123,
+        "channel_username": "@test",
+        "channel_title": "Test",
+        "message_id": 456,
+        "text": "Hello",
+        "timestamp": 1708884000.0,
+        "from_user": {
+            "id": 789,
+            "username": "testuser",
+            "first_name": "Test"
+        }
+    }
+    
+    row_id = await db.insert_message(payload)
+    print(f"✓ Message inserted: {row_id}")
+    
+    # Закрытие
+    await db.close()
+    print("✓ Database closed")
+
+asyncio.run(test_db())
+```
 
 #### Тестирование ChannelRegistry
 
@@ -117,7 +156,7 @@ assert registry.is_active("@test") == True
 
 # Отключение бота
 registry.disable()
-assert registry.is_active("@test") == False  # Бот отключен
+assert registry.is_active("@test") == False
 assert registry.enabled == False
 
 # Включение бота
@@ -131,6 +170,9 @@ assert registry.is_active("@test") == False
 # Очистка
 import os
 os.remove("test_channels.json")
+os.remove("test.db")
+
+print("✓ All tests passed!")
 ```
 
 #### Тестирование Config
@@ -139,12 +181,15 @@ os.remove("test_channels.json")
 # .env
 TELEGRAM_API_ID=123456789
 TELEGRAM_API_HASH=test_hash
+DB_PATH=test.db
 LOG_LEVEL=DEBUG
 
 # Python
 import config
 assert config.TELEGRAM_API_ID == 123456789
 assert config.LOG_LEVEL == "DEBUG"
+assert config.DB_PATH == "test.db"
+print("✓ Config tests passed!")
 ```
 
 #### Тестирование Logger
@@ -156,6 +201,7 @@ setup_logging()
 import logging
 logger = logging.getLogger('parser.test')
 logger.info('Test message')
+print('✓ Logger works')
 "
 
 # Проверить что файл и консоль логируют
@@ -163,61 +209,51 @@ cat test.log
 rm test.log
 ```
 
-### Симуляция WebSocket сервера
+### Интеграционное тестирование БД
 
-```bash
-# Установка инструмента для WebSocket
-pip install websockets
-
-# Создание простого сервера для тестирования
-cat > test_gateway.py << 'EOF'
+```python
 import asyncio
-import json
-import websockets
+import sqlite3
+from db import Database
 
-async def handler(websocket, path):
-    try:
-        # Получить connect фрейм
-        msg = await websocket.recv()
-        connect_frame = json.loads(msg)
-        print(f"Received: {connect_frame}")
+async def test_integration():
+    db = Database("integration_test.db")
+    await db.init()
+    
+    # Вставить несколько сообщений
+    for i in range(5):
+        payload = {
+            "source": "channel",
+            "channel_id": 123,
+            "channel_username": "@news",
+            "message_id": 1000 + i,
+            "text": f"Message {i}",
+            "timestamp": 1708884000.0 + i,
+            "from_user": {
+                "id": 456,
+                "username": "user",
+                "first_name": "User"
+            }
+        }
+        await db.insert_message(payload)
+    
+    await db.close()
+    
+    # Проверить БД
+    conn = sqlite3.connect("integration_test.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM messages")
+    count = cursor.fetchone()[0]
+    conn.close()
+    
+    assert count == 5, f"Expected 5 messages, got {count}"
+    print("✓ Integration test passed!")
+    
+    # Очистка
+    import os
+    os.remove("integration_test.db")
 
-        # Отправить подтверждение
-        await websocket.send(json.dumps({
-            "type": "connected",
-            "ok": True
-        }))
-
-        # Слушать входящие фреймы
-        async for message in websocket:
-            frame = json.loads(message)
-            print(f"Received: {frame}")
-
-            # Отправить тестовую команду
-            if frame.get("type") == "req":
-                await websocket.send(json.dumps({
-                    "type": "res",
-                    "id": frame.get("id"),
-                    "ok": True,
-                    "payload": {"test": "ok"}
-                }))
-    except Exception as e:
-        print(f"Error: {e}")
-
-async def main():
-    async with websockets.serve(handler, "localhost", 3000):
-        print("WebSocket server started on ws://localhost:3000")
-        await asyncio.Future()
-
-if __name__ == "__main__":
-    asyncio.run(main())
-EOF
-
-# Запуск тестового сервера
-python test_gateway.py
-
-# В другом терминале запустить парсер
-python main.py
+asyncio.run(test_integration())
 ```
 
 ## 🐛 Отладка
@@ -236,8 +272,8 @@ tail -f logs/parser.log
 
 # С фильтром
 tail -f logs/parser.log | grep ERROR
-tail -f logs/parser.log | grep "gateway"
-tail -f logs/parser.log | grep "command"
+tail -f logs/parser.log | grep "database\|db"
+tail -f logs/parser.log | grep "message"
 
 # Последние N строк
 tail -100 logs/parser.log
@@ -252,22 +288,28 @@ python -i main.py
 # Перерыв выполнения (Ctrl+C), затем изучение состояния
 ```
 
-### Добавление точек останова
-
-```python
-# В коде
-import pdb; pdb.set_trace()
-
-# Или через Python debugger
-python -m pdb main.py
-```
-
 ### Логирование переменных
 
 ```python
 import json
-logger.debug(f"Frame: {json.dumps(frame, indent=2)}")
-logger.debug(f"Registry state: channels={registry.channels}, enabled={registry.enabled}")
+logger.debug(f"Message: {json.dumps(payload, indent=2)}")
+logger.debug(f"Registry: channels={registry.channels}, enabled={registry.enabled}")
+```
+
+### Инспектирование БД
+
+```bash
+# Структура таблицы
+sqlite3 parser.db ".schema messages"
+
+# Статистика
+sqlite3 parser.db "SELECT source, COUNT(*) FROM messages GROUP BY source;"
+
+# Поиск по каналу
+sqlite3 parser.db "SELECT * FROM messages WHERE channel_username = '@news' LIMIT 5;"
+
+# Экспорт в CSV
+sqlite3 parser.db ".mode csv" "SELECT * FROM messages;" > export.csv
 ```
 
 ## 🚀 Развёртывание
@@ -350,8 +392,8 @@ docker build -t telegram-parser .
 
 # Запуск
 docker run --env-file .env \
+  -v $(pwd)/parser.db:/app/parser.db \
   -v $(pwd)/logs:/app/logs \
-  -v $(pwd)/parser_session.session:/app/parser_session.session \
   telegram-parser
 ```
 
@@ -369,20 +411,14 @@ services:
       - TELEGRAM_API_ID=${TELEGRAM_API_ID}
       - TELEGRAM_API_HASH=${TELEGRAM_API_HASH}
       - TELEGRAM_SESSION_NAME=parser_session
-      - OPENCLAW_GATEWAY_URL=ws://gateway:3000
-      - OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN}
+      - DB_PATH=/app/parser.db
       - LOG_LEVEL=INFO
       - LOG_FILE=/app/logs/parser.log
     volumes:
       - ./logs:/app/logs
+      - ./parser.db:/app/parser.db
       - ./parser_session.session:/app/parser_session.session
-    networks:
-      - openclaw
     restart: unless-stopped
-
-networks:
-  openclaw:
-    external: true
 ```
 
 ```bash
@@ -403,47 +439,43 @@ docker-compose down
 ```bash
 # Обновить версию в коде
 # Создать тег
-git tag v1.0.0
+git tag v1.1.0
 
 # Запустить тесты
 python -m py_compile *.py handlers/*.py
 
 # Пушить изменения
 git push origin main
-git push origin v1.0.0
+git push origin v1.1.0
 ```
 
 ### Changelog формат
 
 ```markdown
-## [1.0.0] - 2025-02-25
+## [1.1.0] - 2025-02-28
 
 ### Added
-- Initial release with channel monitoring
-- WebSocket communication with OpenClaw Gateway
-- Dynamic channel management through commands
+- SQLite database for message storage
+- Autonomous operation without OpenClaw Gateway
 
 ### Changed
-- (nothing)
-
-### Fixed
-- (nothing)
-
-### Deprecated
-- (nothing)
+- Replaced WebSocket with local SQLite storage
+- Simplified architecture
 
 ### Removed
-- (nothing)
+- gateway_client.py (WebSocket)
+- command_handler.py (command handling)
+- websockets dependency
 
-### Security
-- HMAC-SHA256 authentication for WebSocket
+### Migration
+- See ARCHITECTURE.md for new architecture
 ```
 
 ## 🔍 Статический анализ кода
 
 ```bash
 # Установка инструментов
-pip install flake8 pylint mypy black isort
+pip install flake8 pylint black isort
 
 # Форматирование кода
 black *.py handlers/*.py
@@ -454,106 +486,8 @@ isort *.py handlers/*.py
 # Проверка стиля
 flake8 *.py handlers/*.py
 
-# Проверка типов
-mypy *.py handlers/*.py
-
 # Линтинг
 pylint *.py handlers/*.py
-```
-
-## 📚 Документирование
-
-### Стиль документации
-
-```python
-def my_function(param1: str, param2: int = 10) -> bool:
-    """
-    Короткое описание функции.
-
-    Более подробное описание логики функции и её поведения
-    может занимать несколько строк.
-
-    Args:
-        param1: Описание параметра 1
-        param2: Описание параметра 2, по умолчанию 10
-
-    Returns:
-        True если успешно, False если ошибка
-
-    Raises:
-        ValueError: Если param1 пуст
-        TypeError: Если param2 не integer
-
-    Example:
-        >>> my_function("test")
-        True
-        >>> my_function("", 5)
-        ValueError: param1 cannot be empty
-    """
-    pass
-```
-
-### Генерация документации
-
-```bash
-# Установка Sphinx
-pip install sphinx
-
-# Инициализация документации
-sphinx-quickstart docs
-
-# Сборка HTML
-cd docs && make html
-```
-
-## 🔐 Безопасность разработки
-
-### Проверка секретов в коде
-
-```bash
-# Установка
-pip install detect-secrets
-
-# Сканирование
-detect-secrets scan
-
-# Добавление исключений (если есть false positives)
-detect-secrets scan --all-files --baseline .secrets.baseline
-```
-
-### Pre-commit hooks
-
-```bash
-# Установка
-pip install pre-commit
-
-# Конфигурация в .pre-commit-config.yaml
-cat > .pre-commit-config.yaml << 'EOF'
-repos:
-  - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.4.0
-    hooks:
-      - id: check-yaml
-      - id: end-of-file-fixer
-      - id: trailing-whitespace
-      - id: detect-private-key
-
-  - repo: https://github.com/psf/black
-    rev: 23.1.0
-    hooks:
-      - id: black
-
-  - repo: https://github.com/PyCQA/flake8
-    rev: 6.0.0
-    hooks:
-      - id: flake8
-EOF
-
-# Установка hooks
-pre-commit install
-
-# Запуск вручную
-pre-commit run --all-files
 ```
 
 ## 🤝 Contributing
@@ -582,28 +516,28 @@ Types:
   - Add:      Добавление нового функционала
   - Fix:      Исправление ошибок
   - Update:   Обновление существующего кода
-  - Refactor: Переорганизация кода без изменения функционала
+  - Refactor: Переорганизация кода
   - Docs:     Обновление документации
-  - Test:     Добавление или обновление тестов
-  - Chore:    Вспомогательные изменения (зависимости и т.д.)
+  - Test:     Добавление тестов
+  - Chore:    Вспомогательные изменения
 
 Examples:
-  - Add: Support for message reactions
-  - Fix: WebSocket reconnection on disconnect
-  - Update: Improve error messages for invalid commands
-  - Refactor: Extract command validation to separate module
-  - Docs: Add example configuration
+  - Add: Support for message filtering
+  - Fix: Database connection timeout
+  - Update: Improve error messages
+  - Refactor: Extract database operations
+  - Docs: Update README with examples
   - Chore: Update dependencies
 ```
 
 ## 📖 Полезные ресурсы
 
 - [Pyrogram Documentation](https://docs.pyrogram.org/)
+- [aiosqlite Documentation](https://aiosqlite.readthedocs.io/)
 - [asyncio Documentation](https://docs.python.org/3/library/asyncio.html)
-- [websockets Documentation](https://websockets.readthedocs.io/)
+- [SQLite Documentation](https://www.sqlite.org/docs.html)
 - [Python Logging](https://docs.python.org/3/library/logging.html)
 - [PEP 8 Style Guide](https://www.python.org/dev/peps/pep-0008/)
-- [Type Hints](https://docs.python.org/3/library/typing.html)
 
 ## 🎓 Обучение
 
@@ -612,33 +546,38 @@ Examples:
 1. **config.py** - начните здесь, простая загрузка переменных
 2. **logger.py** - понимание логирования
 3. **channel_registry.py** - простая логика хранения состояния
-4. **gateway_client.py** - WebSocket коммуникация
-5. **command_handler.py** - обработка команд
-6. **handlers/channel_handler.py** - обработка сообщений из каналов
-7. **handlers/private_handler.py** - обработка личных сообщений
-8. **tg_client.py** - Pyrogram интеграция
-9. **main.py** - оркестрация всех компонентов
+4. **db.py** - работа с SQLite БД ← НОВЫЙ МОДУЛЬ
+5. **handlers/channel_handler.py** - обработка сообщений из каналов
+6. **handlers/private_handler.py** - обработка личных сообщений
+7. **tg_client.py** - Pyrogram интеграция
+8. **main.py** - оркестрация всех компонентов
 
 ### Практические задачи
 
-1. **Добавить новую команду:**
-   - Добавить обработку в `command_handler.py`
-   - Добавить соответствующий метод в `ChannelRegistry`
-   - Протестировать с WebSocket клиентом
+1. **Добавить новое поле в БД:**
+   - Модифицировать SQL в `db.py`
+   - Обновить payload в handlers
+   - Тестировать вставку и чтение
 
 2. **Добавить новый фильтр сообщений:**
    - Создать новый файл в `handlers/`
    - Зарегистрировать в `tg_client.py`
-   - Добавить логирование
+   - Сохранять через `db.insert_message()`
 
-3. **Улучшить логирование:**
-   - Добавить новые уровни логирования
-   - Структурировать логи в JSON формат
-   - Интегрировать с системой мониторинга
+3. **Создать REST API для доступа к БД:**
+   - Установить Flask
+   - Создать routes для чтения из messages
+   - Запустить как микросервис
+
+4. **Добавить экспорт в CSV/JSON:**
+   - Добавить функции в `db.py`
+   - Создать CLI скрипт
+   - Документировать использование
 
 ## 🆘 Получение помощи
 
 - Проверьте логи с `LOG_LEVEL=DEBUG`
-- Прочитайте документацию в `README.md` и `ARCHITECTURE.md`
-- Ищите примеры в коде существующих обработчиков
+- Прочитайте документацию в README.md и ARCHITECTURE.md
+- Ищите примеры в коде существующих компонентов
 - Консультируйте документацию зависимостей
+- Проверьте FAQ.md для частых вопросов
