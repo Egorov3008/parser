@@ -2,11 +2,10 @@ import asyncio
 import logging
 from pyrogram import idle
 from logger import setup_logging
-from config import TELEGRAM_API_ID, TELEGRAM_API_HASH
+from config import TELEGRAM_API_ID, TELEGRAM_API_HASH, DB_PATH
 from tg_client import build_client, register_handlers
-from gateway_client import GatewayClient
+from db import Database
 from channel_registry import ChannelRegistry
-from command_handler import handle_gateway_command
 
 logger = logging.getLogger("parser.main")
 
@@ -22,27 +21,18 @@ async def main():
         logger.error("TELEGRAM_API_ID and TELEGRAM_API_HASH are required")
         return
 
-    # Import config after logger is set up
-    import config
-
     # Initialize components
     registry = ChannelRegistry()
-    gateway = GatewayClient(config.OPENCLAW_GATEWAY_URL, config.OPENCLAW_GATEWAY_TOKEN)
+    db = Database(DB_PATH)
     app = None
 
     try:
-        # Connect to OpenClaw Gateway
-        await gateway.connect()
+        # Initialize database
+        await db.init()
 
         # Build and register Pyrogram client
         app = build_client()
-        register_handlers(app, gateway, registry)
-
-        # Create task for listening to gateway commands
-        async def command_callback(frame):
-            await handle_gateway_command(frame, registry, gateway, app)
-
-        listen_task = asyncio.create_task(gateway.listen(command_callback))
+        register_handlers(app, db, registry)
 
         logger.info("Starting Pyrogram client")
         await app.start()
@@ -63,9 +53,9 @@ async def main():
             except Exception as e:
                 logger.warning(f"Error stopping app: {e}")
         try:
-            await gateway.close()
+            await db.close()
         except Exception as e:
-            logger.warning(f"Error closing gateway: {e}")
+            logger.warning(f"Error closing database: {e}")
         logger.info("Shutdown complete")
 
 

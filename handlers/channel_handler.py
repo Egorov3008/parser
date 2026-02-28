@@ -3,7 +3,7 @@ import logging
 logger = logging.getLogger("parser.handler.channel")
 
 
-async def handle_channel_message(client, message, gateway, registry):
+async def handle_channel_message(client, message, db, registry):
     """Handle messages from Telegram channels."""
     try:
         # Check if channel is active
@@ -26,6 +26,7 @@ async def handle_channel_message(client, message, gateway, registry):
         } if from_user else None
 
         payload = {
+            "source": "channel",
             "channel_id": message.chat.id,
             "channel_username": channel_username,
             "channel_title": message.chat.title or "",
@@ -35,8 +36,8 @@ async def handle_channel_message(client, message, gateway, registry):
             "from_user": user_info,
         }
 
-        logger.debug(f"Sending channel message: {payload}")
-        await gateway.send_event("message.ingest", payload)
+        logger.debug(f"Storing channel message: {payload}")
+        await db.insert_message(payload)
 
     except Exception as e:
         logger.error(f"Error handling channel message: {e}")
