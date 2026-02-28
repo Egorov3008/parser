@@ -4,7 +4,10 @@ logger = logging.getLogger("parser.handler.private")
 
 
 async def handle_private_message(client, message, db, registry):
-    """Handle private messages (DM) to the account."""
+    """Handle private messages (DM) to the account.
+
+    Captures all incoming DMs, including from info bots and channels.
+    """
     try:
         # Check if bot is globally enabled
         if not registry.enabled:
@@ -15,9 +18,17 @@ async def handle_private_message(client, message, db, registry):
         text = message.text or message.caption or ""
         from_user = message.from_user
 
-        if not from_user:
-            logger.debug("Skipping private message with no from_user")
-            return
+        # If from_user missing (rare cases), use chat data
+        if from_user:
+            from_user_id = from_user.id
+            from_username = from_user.username
+            from_first_name = from_user.first_name
+        else:
+            # Fallback: use chat info
+            from_user_id = None
+            from_username = message.chat.username
+            from_first_name = message.chat.title or "Unknown"
+            logger.debug(f"Using fallback user info for chat {message.chat.id}")
 
         payload = {
             "source": "private",
@@ -26,9 +37,9 @@ async def handle_private_message(client, message, db, registry):
             "text": text,
             "timestamp": message.date.timestamp() if message.date else None,
             "from_user": {
-                "id": from_user.id,
-                "username": from_user.username,
-                "first_name": from_user.first_name,
+                "id": from_user_id,
+                "username": from_username,
+                "first_name": from_first_name,
             },
         }
 
