@@ -1,4 +1,5 @@
 import logging
+from filters.universal_filter import universal_filter
 
 logger = logging.getLogger("parser.handler.channel")
 
@@ -25,6 +26,11 @@ async def handle_channel_message(client, message, db, registry):
             "first_name": from_user.first_name if from_user else None,
         } if from_user else None
 
+        # Проверяем фильтр (теперь принимает ВСЁ)
+        if not universal_filter.is_relevant(text):
+            logger.debug(f"Message filtered out: {channel_username}")
+            return
+
         payload = {
             "source": "channel",
             "channel_id": message.chat.id,
@@ -35,6 +41,12 @@ async def handle_channel_message(client, message, db, registry):
             "timestamp": message.date.timestamp() if message.date else None,
             "from_user": user_info,
         }
+
+        # Извлекаем мета-данные
+        info = universal_filter.extract_info(text)
+        payload["price"] = info.get("price")
+        payload["urgency"] = info.get("urgency")
+        payload["title"] = info.get("title")
 
         logger.debug(f"Storing channel message: {payload}")
         await db.insert_message(payload)

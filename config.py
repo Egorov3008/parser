@@ -11,3 +11,12 @@ DB_PATH = os.getenv("DB_PATH", "parser.db")
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 LOG_FILE = os.getenv("LOG_FILE", "logs/parser.log")
+
+# Каналы для мониторинга
+CHANNELS_MONITORING = os.getenv("CHANNELS_MONITORING", "")
+
+def get_monitored_channels() -> list:
+    """Возвращает список каналов для мониторинга"""
+    if not CHANNELS_MONITORING:
+        return []
+    return [ch.strip() for ch in CHANNELS_MONITORING.split(",")]
